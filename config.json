@@ -2,6 +2,6 @@
   "portal_url": "https://mavic-tataconsumer.my.site.com/dms/s/login/",
   "headless": false,
   "debug": false,
-  "test_mode": true,
-  "sheet_path": "D:\\TATA_SHIPMENTS.xlsx"
+  "sheet_path": "",
+  "selected_portal": "tata_consumer"
 }

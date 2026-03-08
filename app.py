@@ -1,10 +1,5 @@
 """
 app.py — Tkinter GUI for Portal Automation Engine
-Wraps main.py engine with:
-  - Editable config (sheet path, headless, debug)
-  - Live log window (stdout redirected to widget)
-  - CSV run log saved to logs/ folder
-  - Run/Stop controls
 """
 
 import csv
@@ -16,29 +11,60 @@ import threading
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, font, messagebox, scrolledtext, ttk
+from tkinter import filedialog, font, messagebox, scrolledtext
 
-# ── Ensure we can import the engine from the same folder ──────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# PORTAL DEFINITIONS
+# active=True  → selectable, engine wired up
+# active=False → greyed out, coming soon
+# otp=True     → shows OTP badge
+# ──────────────────────────────────────────────────────────────────────
+PORTALS = [
+    {
+        "id":     "tata_consumer",
+        "label":  "Tata Consumer",
+        "sub":    "Non-OTP  •  Active",
+        "active": True,
+        "otp":    False,
+    },
+    {
+        "id":     "portal_2",
+        "label":  "Portal 2",
+        "sub":    "Non-OTP  •  Coming Soon",
+        "active": False,
+        "otp":    False,
+    },
+    {
+        "id":     "portal_3",
+        "label":  "Portal 3",
+        "sub":    "OTP Login  •  Coming Soon",
+        "active": False,
+        "otp":    True,
+    },
+    {
+        "id":     "portal_4",
+        "label":  "Portal 4",
+        "sub":    "OTP Login  •  Coming Soon",
+        "active": False,
+        "otp":    True,
+    },
+]
 
 
 # ──────────────────────────────────────────────────────────────────────
 # CSV RUN LOGGER
 # ──────────────────────────────────────────────────────────────────────
 class RunLogger:
-    """
-    Writes a structured CSV log for each run.
-    Columns: timestamp, invoice_no, payment_mode, amount, status, notes
-    File: logs/run_YYYYMMDD_HHMMSS.csv
-    """
-
     COLUMNS = ["timestamp", "invoice_no", "payment_mode", "amount", "status", "notes"]
 
-    def __init__(self):
+    def __init__(self, portal_id="portal"):
         self.log_dir  = Path("logs")
         self.log_dir.mkdir(exist_ok=True)
-        timestamp     = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_path = self.log_dir / f"run_{timestamp}.csv"
+        ts            = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_path = self.log_dir / f"run_{portal_id}_{ts}.csv"
         self._write_header()
 
     def _write_header(self):
@@ -47,16 +73,15 @@ class RunLogger:
 
     def record(self, invoice_no="", payment_mode="", amount="",
                status="", notes=""):
-        row = {
-            "timestamp":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "invoice_no":   invoice_no,
-            "payment_mode": payment_mode,
-            "amount":       amount,
-            "status":       status,
-            "notes":        notes,
-        }
         with open(self.log_path, "a", newline="", encoding="utf-8") as f:
-            csv.DictWriter(f, fieldnames=self.COLUMNS).writerow(row)
+            csv.DictWriter(f, fieldnames=self.COLUMNS).writerow({
+                "timestamp":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "invoice_no":   invoice_no,
+                "payment_mode": payment_mode,
+                "amount":       amount,
+                "status":       status,
+                "notes":        notes,
+            })
 
     @property
     def path(self):
@@ -64,12 +89,10 @@ class RunLogger:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# STDOUT REDIRECTOR → tkinter queue
+# STDOUT → queue
 # ──────────────────────────────────────────────────────────────────────
 class QueueWriter:
-    """Redirects print() output to a thread-safe queue for the GUI."""
-
-    def __init__(self, q: queue.Queue):
+    def __init__(self, q):
         self.queue = q
 
     def write(self, text):
@@ -81,45 +104,49 @@ class QueueWriter:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# MAIN GUI
+# GUI
 # ──────────────────────────────────────────────────────────────────────
 class PortalAutomationApp(tk.Tk):
 
     CONFIG_FILE = "config.json"
 
-    # Colour palette — clean, professional, Windows-native feel
-    BG          = "#F5F5F5"
+    # Colours
+    BG          = "#F0F0F0"
     PANEL_BG    = "#FFFFFF"
-    ACCENT      = "#5B2D8E"   # Mavic purple (matches portal)
+    ACCENT      = "#5B2D8E"
     ACCENT_DARK = "#3D1A6B"
+    ACCENT_LITE = "#EDE7F6"
     TEXT        = "#1A1A1A"
-    TEXT_MUTED  = "#6B6B6B"
-    LOG_BG      = "#1E1E1E"   # dark terminal feel
+    TEXT_MUTED  = "#757575"
+    DISABLED_BG = "#FAFAFA"
+    DISABLED_FG = "#BBBBBB"
+    BORDER      = "#E0E0E0"
+    LOG_BG      = "#1E1E1E"
     LOG_FG      = "#D4D4D4"
-    LOG_OK      = "#4EC9B0"   # teal  — success
-    LOG_WARN    = "#DCDCAA"   # yellow — warning/skip
-    LOG_ERR     = "#F44747"   # red   — error
-    LOG_INFO    = "#9CDCFE"   # blue  — info
+    LOG_OK      = "#4EC9B0"
+    LOG_WARN    = "#DCDCAA"
+    LOG_ERR     = "#F44747"
+    LOG_INFO    = "#9CDCFE"
 
     def __init__(self):
         super().__init__()
-
         self.title("Portal Automation Engine")
-        self.geometry("820x680")
-        self.minsize(700, 560)
+        self.geometry("880x780")
+        self.minsize(740, 640)
         self.configure(bg=self.BG)
         self.resizable(True, True)
 
-        # State
-        self._run_thread  = None
-        self._log_queue   = queue.Queue()
-        self._running     = False
-        self._run_logger  = None
+        self._run_thread      = None
+        self._log_queue       = queue.Queue()
+        self._running         = False
+        self._run_logger      = None
+        self._log_text_buffer = []   # full text for TXT export
 
         # Config vars
-        self._sheet_path = tk.StringVar()
-        self._headless   = tk.BooleanVar(value=False)
-        self._debug      = tk.BooleanVar(value=False)
+        self._sheet_path      = tk.StringVar()
+        self._headless        = tk.BooleanVar(value=False)
+        self._debug           = tk.BooleanVar(value=False)
+        self._selected_portal = tk.StringVar(value=PORTALS[0]["id"])
 
         self._load_config()
         self._build_ui()
@@ -130,26 +157,30 @@ class PortalAutomationApp(tk.Tk):
         if Path(self.CONFIG_FILE).exists():
             with open(self.CONFIG_FILE) as f:
                 cfg = json.load(f)
-            self._sheet_path.set(cfg.get("sheet_path", r"D:\TATA_SHIPMENTS.xlsx"))
+            self._sheet_path.set(cfg.get("sheet_path", ""))
             self._headless.set(cfg.get("headless", False))
             self._debug.set(cfg.get("debug", False))
+            self._selected_portal.set(
+                cfg.get("selected_portal", PORTALS[0]["id"])
+            )
         else:
-            self._sheet_path.set(r"D:\TATA_SHIPMENTS.xlsx")
+            self._sheet_path.set("")
 
     def _save_config(self):
+        cfg = {}
         if Path(self.CONFIG_FILE).exists():
             with open(self.CONFIG_FILE) as f:
                 cfg = json.load(f)
-        else:
-            cfg = {}
-        cfg["sheet_path"] = self._sheet_path.get()
-        cfg["headless"]   = self._headless.get()
-        cfg["debug"]      = self._debug.get()
+        cfg["sheet_path"]      = self._sheet_path.get()
+        cfg["headless"]        = self._headless.get()
+        cfg["debug"]           = self._debug.get()
+        cfg["selected_portal"] = self._selected_portal.get()
         with open(self.CONFIG_FILE, "w") as f:
             json.dump(cfg, f, indent=2)
 
     # ── BUILD UI ───────────────────────────────────────────────────────
     def _build_ui(self):
+
         # ── Header ────────────────────────────────────────────────────
         header = tk.Frame(self, bg=self.ACCENT, height=56)
         header.pack(fill="x")
@@ -160,8 +191,7 @@ class PortalAutomationApp(tk.Tk):
             text="⚡  Portal Automation Engine",
             bg=self.ACCENT, fg="white",
             font=("Segoe UI", 14, "bold"),
-            pady=14,
-        ).pack(side="left", padx=20)
+        ).pack(side="left", padx=20, pady=14)
 
         self._status_label = tk.Label(
             header, text="● Idle",
@@ -170,9 +200,27 @@ class PortalAutomationApp(tk.Tk):
         )
         self._status_label.pack(side="right", padx=20)
 
-        # ── Config panel ──────────────────────────────────────────────
-        panel = tk.Frame(self, bg=self.PANEL_BG, padx=20, pady=16)
-        panel.pack(fill="x", padx=16, pady=(12, 0))
+        # ── Portal selector ───────────────────────────────────────────
+        portal_outer = tk.Frame(self, bg=self.BG, padx=16, pady=12)
+        portal_outer.pack(fill="x")
+
+        tk.Label(
+            portal_outer,
+            text="SELECT PORTAL",
+            bg=self.BG, fg=self.TEXT_MUTED,
+            font=("Segoe UI", 8, "bold"),
+        ).pack(anchor="w", pady=(0, 8))
+
+        cards_frame = tk.Frame(portal_outer, bg=self.BG)
+        cards_frame.pack(fill="x")
+
+        for i, portal in enumerate(PORTALS):
+            self._build_portal_card(cards_frame, portal, i)
+        cards_frame.columnconfigure((0, 1, 2, 3), weight=1, uniform="card")
+
+        # ── Settings panel ────────────────────────────────────────────
+        panel = tk.Frame(self, bg=self.PANEL_BG, padx=20, pady=14)
+        panel.pack(fill="x", padx=16)
 
         tk.Label(
             panel, text="SETTINGS",
@@ -187,29 +235,25 @@ class PortalAutomationApp(tk.Tk):
             font=("Segoe UI", 10),
         ).grid(row=1, column=0, sticky="w", pady=4)
 
-        sheet_entry = tk.Entry(
+        tk.Entry(
             panel,
             textvariable=self._sheet_path,
             font=("Segoe UI", 10),
-            width=52,
-            relief="solid",
-            bd=1,
-        )
-        sheet_entry.grid(row=1, column=1, sticky="ew", padx=(8, 6), pady=4)
+            width=52, relief="solid", bd=1,
+        ).grid(row=1, column=1, sticky="ew", padx=(8, 6), pady=4)
 
         tk.Button(
             panel, text="Browse",
             command=self._browse_sheet,
             bg=self.ACCENT, fg="white",
             font=("Segoe UI", 9),
-            relief="flat",
-            padx=10, pady=4,
+            relief="flat", padx=10, pady=4,
             cursor="hand2",
             activebackground=self.ACCENT_DARK,
             activeforeground="white",
         ).grid(row=1, column=2, pady=4)
 
-        # Toggles row
+        # Toggles
         toggle_frame = tk.Frame(panel, bg=self.PANEL_BG)
         toggle_frame.grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
@@ -235,18 +279,16 @@ class PortalAutomationApp(tk.Tk):
 
         panel.columnconfigure(1, weight=1)
 
-        # ── Run / Stop buttons ────────────────────────────────────────
+        # ── Action buttons ────────────────────────────────────────────
         btn_frame = tk.Frame(self, bg=self.BG)
         btn_frame.pack(fill="x", padx=16, pady=10)
 
         self._run_btn = tk.Button(
-            btn_frame,
-            text="▶  RUN",
+            btn_frame, text="▶  RUN",
             command=self._start_run,
             bg=self.ACCENT, fg="white",
             font=("Segoe UI", 11, "bold"),
-            relief="flat",
-            padx=28, pady=8,
+            relief="flat", padx=28, pady=8,
             cursor="hand2",
             activebackground=self.ACCENT_DARK,
             activeforeground="white",
@@ -254,23 +296,34 @@ class PortalAutomationApp(tk.Tk):
         self._run_btn.pack(side="left")
 
         self._stop_btn = tk.Button(
-            btn_frame,
-            text="■  STOP",
+            btn_frame, text="■  STOP",
             command=self._stop_run,
-            bg="#C0392B", fg="white",
+            bg="#999999", fg="white",
             font=("Segoe UI", 11, "bold"),
-            relief="flat",
-            padx=28, pady=8,
-            cursor="hand2",
-            state="disabled",
-            activebackground="#922B21",
+            relief="flat", padx=28, pady=8,
+            cursor="arrow", state="disabled",
+            disabledforeground="white",
+            activebackground="#C0392B",
             activeforeground="white",
         )
         self._stop_btn.pack(side="left", padx=(8, 0))
 
+        # Export Log button
+        self._export_btn = tk.Button(
+            btn_frame, text="⬇  Export Log",
+            command=self._export_log_txt,
+            bg=self.PANEL_BG, fg=self.TEXT_MUTED,
+            font=("Segoe UI", 9),
+            relief="solid", bd=1,
+            padx=12, pady=8,
+            cursor="hand2",
+            activebackground=self.BG,
+        )
+        self._export_btn.pack(side="left", padx=(16, 0))
+
+        # CSV log path label
         self._log_path_label = tk.Label(
-            btn_frame,
-            text="",
+            btn_frame, text="",
             bg=self.BG, fg=self.TEXT_MUTED,
             font=("Segoe UI", 9),
         )
@@ -280,48 +333,100 @@ class PortalAutomationApp(tk.Tk):
         log_frame = tk.Frame(self, bg=self.BG)
         log_frame.pack(fill="both", expand=True, padx=16, pady=(0, 12))
 
+        log_header = tk.Frame(log_frame, bg=self.BG)
+        log_header.pack(fill="x", pady=(0, 4))
+
         tk.Label(
-            log_frame,
-            text="RUN LOG",
+            log_header, text="RUN LOG",
             bg=self.BG, fg=self.TEXT_MUTED,
             font=("Segoe UI", 8, "bold"),
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(side="left")
+
+        tk.Button(
+            log_header, text="Clear",
+            command=self._clear_log,
+            bg=self.BG, fg=self.TEXT_MUTED,
+            font=("Segoe UI", 8),
+            relief="flat", cursor="hand2",
+        ).pack(side="right")
 
         self._log_box = scrolledtext.ScrolledText(
             log_frame,
-            bg=self.LOG_BG,
-            fg=self.LOG_FG,
-            font=("Cascadia Code", 9) if self._font_exists("Cascadia Code")
+            bg=self.LOG_BG, fg=self.LOG_FG,
+            font=("Cascadia Code", 9) if "Cascadia Code" in font.families()
                  else ("Consolas", 9),
-            relief="flat",
-            wrap="word",
+            relief="flat", wrap="word",
             state="disabled",
             padx=10, pady=10,
         )
         self._log_box.pack(fill="both", expand=True)
 
-        # Colour tags for log lines
+        # Log colour tags
         self._log_box.tag_config("ok",   foreground=self.LOG_OK)
         self._log_box.tag_config("warn", foreground=self.LOG_WARN)
         self._log_box.tag_config("err",  foreground=self.LOG_ERR)
         self._log_box.tag_config("info", foreground=self.LOG_INFO)
-        self._log_box.tag_config("dim",  foreground="#666666")
 
-        # Clear log button
-        tk.Button(
-            log_frame,
-            text="Clear log",
-            command=self._clear_log,
-            bg=self.BG, fg=self.TEXT_MUTED,
+    # ── PORTAL CARDS ───────────────────────────────────────────────────
+    def _build_portal_card(self, parent, portal, col):
+        """
+        Each portal gets a card with a radio button.
+        Active portals → selectable, white bg, purple on select.
+        Inactive       → greyed out, not selectable, 'Coming Soon' badge.
+        """
+        is_active = portal["active"]
+
+        card_bg     = self.PANEL_BG if is_active else self.DISABLED_BG
+        fg_main     = self.TEXT     if is_active else self.DISABLED_FG
+        fg_sub      = self.TEXT_MUTED if is_active else "#CCCCCC"
+        relief      = "solid"
+        bd          = 1
+
+        card = tk.Frame(
+            parent,
+            bg=card_bg,
+            relief=relief, bd=bd,
+            padx=12, pady=10,
+        )
+        card.grid(row=0, column=col, sticky="nsew", padx=(0, 8))
+
+        # Radio button — disabled for inactive portals
+        rb = tk.Radiobutton(
+            card,
+            variable=self._selected_portal,
+            value=portal["id"],
+            bg=card_bg,
+            activebackground=card_bg,
+            selectcolor=self.ACCENT_LITE,
+            state="normal" if is_active else "disabled",
+            cursor="hand2" if is_active else "arrow",
+        )
+        rb.pack(anchor="w")
+
+        # Portal name
+        tk.Label(
+            card, text=portal["label"],
+            bg=card_bg, fg=fg_main,
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Sub label
+        tk.Label(
+            card, text=portal["sub"],
+            bg=card_bg, fg=fg_sub,
             font=("Segoe UI", 8),
-            relief="flat",
-            cursor="hand2",
-        ).pack(anchor="e", pady=(4, 0))
+        ).pack(anchor="w")
+
+        # OTP badge for OTP portals
+        if portal.get("otp"):
+            tk.Label(
+                card, text="  OTP  ",
+                bg="#F0E6FF", fg=self.ACCENT,
+                font=("Segoe UI", 7, "bold"),
+                relief="flat", padx=4,
+            ).pack(anchor="w", pady=(4, 0))
 
     # ── HELPERS ────────────────────────────────────────────────────────
-    def _font_exists(self, name):
-        return name in font.families()
-
     def _browse_sheet(self):
         path = filedialog.askopenfilename(
             title="Select invoice sheet",
@@ -340,13 +445,34 @@ class PortalAutomationApp(tk.Tk):
         self._log_box.config(state="normal")
         self._log_box.delete("1.0", "end")
         self._log_box.config(state="disabled")
+        self._log_text_buffer.clear()
+
+    # ── EXPORT LOG AS TXT ──────────────────────────────────────────────
+    def _export_log_txt(self):
+        if not self._log_text_buffer:
+            messagebox.showinfo("Export Log", "No log content to export yet.")
+            return
+
+        default_name = f"run_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        path = filedialog.asksaveasfilename(
+            title="Save Log as Text File",
+            defaultextension=".txt",
+            initialfile=default_name,
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+        )
+        if path:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("".join(self._log_text_buffer))
+            messagebox.showinfo(
+                "Export Log",
+                f"Log saved to:\n{path}\n\nSend this file for support."
+            )
 
     # ── LOG WRITER ─────────────────────────────────────────────────────
     def _append_log(self, text: str):
-        """Write a line to the log box with colour coding."""
+        self._log_text_buffer.append(text)
         self._log_box.config(state="normal")
 
-        # Pick tag based on content
         lower = text.lower()
         if any(k in lower for k in ("✅", "done", "complete", "saved", "clicked")):
             tag = "ok"
@@ -356,7 +482,8 @@ class PortalAutomationApp(tk.Tk):
         elif any(k in lower for k in ("❌", "error", "failed", "timeout")):
             tag = "err"
         elif any(k in lower for k in ("───", "===", "processing", "date from",
-                                       "entries to", "navigating", "reading")):
+                                       "entries to", "navigating", "reading",
+                                       "run started")):
             tag = "info"
         else:
             tag = None
@@ -366,20 +493,9 @@ class PortalAutomationApp(tk.Tk):
         self._log_box.config(state="disabled")
 
     def _poll_log_queue(self):
-        """Check queue every 50ms and flush to log box."""
         try:
             while True:
-                text = self._log_queue.get_nowait()
-                self._append_log(text)
-
-                # Mirror to CSV run log with basic parsing
-                if self._run_logger:
-                    line = text.strip()
-                    if "Processing:" in line:
-                        # e.g. "Processing: IN123  [Cash  Rs.827]"
-                        pass   # captured at fill_one_row level below
-                    elif "✅ Done" in line or "✅ done" in line:
-                        pass   # captured per-row
+                self._append_log(self._log_queue.get_nowait())
         except queue.Empty:
             pass
         finally:
@@ -391,73 +507,56 @@ class PortalAutomationApp(tk.Tk):
             return
 
         sheet = self._sheet_path.get().strip()
-        if not sheet or not Path(sheet).exists():
+        if sheet and not Path(sheet).exists():
             messagebox.showerror(
                 "Sheet not found",
-                f"Cannot find sheet at:\n{sheet}\n\nPlease check the path."
+                f"Cannot find sheet at:\n{sheet}\n\nPlease check the path and try again."
             )
             return
 
         self._save_config()
         self._running = True
         self._run_btn.config(state="disabled")
-        self._stop_btn.config(state="normal")
+        self._stop_btn.config(
+            state="normal", bg="#C0392B", fg="white", cursor="hand2"
+        )
         self._set_status("● Running", "#90EE90")
 
-        # New CSV log for this run
-        self._run_logger = RunLogger()
-        self._log_path_label.config(
-            text=f"📄 {self._run_logger.path}"
-        )
-        self._run_logger.record(
-            status="RUN STARTED",
-            notes=f"Sheet: {sheet}"
-        )
+        portal_id        = self._selected_portal.get()
+        self._run_logger = RunLogger(portal_id)
+        self._log_path_label.config(text=f"📄 {self._run_logger.path}")
+        self._run_logger.record(status="RUN STARTED", notes=f"Sheet: {sheet}")
 
         self._append_log(
             f"\n{'─'*60}\n"
             f"  RUN STARTED  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"  Sheet: {sheet}\n"
-            f"  Log:   {self._run_logger.path}\n"
+            f"  Portal : {portal_id}\n"
+            f"  Sheet  : {sheet}\n"
+            f"  CSV Log: {self._run_logger.path}\n"
             f"{'─'*60}\n"
         )
 
-        # Run in background thread so GUI stays responsive
-        self._run_thread = threading.Thread(
-            target=self._run_engine, daemon=True
-        )
+        self._run_thread = threading.Thread(target=self._run_engine, daemon=True)
         self._run_thread.start()
 
     def _run_engine(self):
-        """Background thread — runs the full automation."""
-        # Redirect stdout/stderr to the queue
-        orig_stdout = sys.stdout
-        orig_stderr = sys.stderr
-        writer      = QueueWriter(self._log_queue)
-        sys.stdout  = writer
-        sys.stderr  = writer
+        orig_stdout, orig_stderr = sys.stdout, sys.stderr
+        writer = QueueWriter(self._log_queue)
+        sys.stdout = sys.stderr = writer
 
         try:
-            # Import engine here so errors surface in the log
-            from main import (
-                RetailerPortalEngine,
-                load_config,
-                load_rows_from_csv,
-            )
+            from main import RetailerPortalEngine, load_config, load_rows_from_csv
 
-            config = load_config()
-            # Override with current GUI values
+            config               = load_config()
             config["sheet_path"] = self._sheet_path.get()
             config["headless"]   = self._headless.get()
             config["debug"]      = self._debug.get()
 
             engine = RetailerPortalEngine(config)
-
             engine.launch()
             engine.login()
 
-            csv_path         = config["sheet_path"]
-            rows, run_date   = load_rows_from_csv(csv_path)
+            rows, run_date = load_rows_from_csv(config["sheet_path"])
 
             if not rows:
                 print("⚠️  No processable rows found in sheet.")
@@ -472,7 +571,7 @@ class PortalAutomationApp(tk.Tk):
                 for row in rows:
                     if not self._running:
                         print("\n⏹  Run stopped by user.")
-                        self._run_logger.record(status="STOPPED", notes="User stopped run")
+                        self._run_logger.record(status="STOPPED")
                         break
                     try:
                         engine.fill_one_row(
@@ -502,9 +601,8 @@ class PortalAutomationApp(tk.Tk):
                     print("\n✅ All entries processed.")
                     print("\n" + "="*55)
                     print("  ⏸  Review the table in the browser.")
-                    print("  Final page Save will click automatically in 5 seconds...")
+                    print("  Final Save in 5 seconds...")
                     print("="*55)
-                    # Give user 5s to look before final save
                     import time
                     for i in range(5, 0, -1):
                         if not self._running:
@@ -523,7 +621,7 @@ class PortalAutomationApp(tk.Tk):
             print("\n✅ Run complete.")
             self._run_logger.record(
                 status="RUN COMPLETE",
-                notes=f"Log saved: {self._run_logger.path}"
+                notes=f"CSV log: {self._run_logger.path}"
             )
 
         except Exception as e:
@@ -531,30 +629,28 @@ class PortalAutomationApp(tk.Tk):
             print(f"\n❌ Fatal error: {e}")
             print(traceback.format_exc())
             if self._run_logger:
-                self._run_logger.record(
-                    status="❌ FATAL ERROR",
-                    notes=str(e)
-                )
+                self._run_logger.record(status="❌ FATAL ERROR", notes=str(e))
         finally:
-            sys.stdout = orig_stdout
-            sys.stderr = orig_stderr
+            sys.stdout, sys.stderr = orig_stdout, orig_stderr
             self._running = False
             self.after(0, self._on_run_finished)
 
     def _stop_run(self):
         if self._running:
             self._running = False
-            self._append_log("\n⏹  Stop requested — will halt after current row.\n")
+            self._append_log("\n⏹  Stop requested — halting after current row.\n")
 
     def _on_run_finished(self):
         self._running = False
         self._run_btn.config(state="normal")
-        self._stop_btn.config(state="disabled")
+        self._stop_btn.config(
+            state="disabled", bg="#6B2020", fg="#AAAAAA", cursor="arrow"
+        )
         self._set_status("● Idle")
         if self._run_logger:
             self._append_log(
-                f"\n📄 Run log saved: {self._run_logger.path}\n"
-                f"   Send this file to your developer for review.\n"
+                f"\n📄 CSV log: {self._run_logger.path}\n"
+                f"   Use '⬇ Export Log' to save the full text log.\n"
             )
 
 
