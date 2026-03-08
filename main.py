@@ -4,8 +4,14 @@ import os
 from datetime import datetime
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
+import sys
 
-load_dotenv()
+# When packaged as .exe, resolve paths relative to the .exe location
+# When running as script, resolve relative to main.py
+_base = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False)         else os.path.dirname(os.path.abspath(__file__))
+
+# Load .env from the same folder as the .exe / script
+load_dotenv(os.path.join(_base, ".env"))
 
 USERNAME = os.getenv("PORTAL_USERNAME")
 PASSWORD = os.getenv("PORTAL_PASSWORD")
@@ -15,7 +21,15 @@ PASSWORD = os.getenv("PORTAL_PASSWORD")
 # CONFIG
 # ──────────────────────────────────────────────────────────────────────
 def load_config():
-    with open("config.json") as f:
+    import sys
+    # When packaged as .exe, load config.json from next to the .exe
+    # When running as script, load from next to main.py
+    if getattr(sys, 'frozen', False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(base, "config.json")
+    with open(config_path) as f:
         return json.load(f)
 
 
@@ -42,7 +56,7 @@ PORTAL_COL_MAP = {
 
 def load_rows_from_csv(csv_path: str):
     """
-    Read invoice rows from the client CSV.
+    Read invoice rows from CSV (.csv) or Excel (.xlsx/.xls).
     Columns used: Bill Number, Bill Date, Cash, Cheque Amount, UPI Amount,
                   Credit Amount
 
@@ -58,48 +72,69 @@ def load_rows_from_csv(csv_path: str):
     """
     rows     = []
     skipped  = []
-    run_date = None   # auto-detected from first data row
+    run_date = None
 
-    with open(csv_path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        for raw in reader:
-            invoice_no = raw.get("Bill Number", "").strip()
-            date_raw   = raw.get("Bill Date",   "").strip()
-
-            if not invoice_no:
-                continue
-
-            # Capture the date from the first real data row
-            if run_date is None and date_raw:
-                run_date = date_raw
-
-            # Build one entry per non-empty payment column
-            payments = []
-            for col, mode in PAYMENT_MODE_MAP.items():
-                val = raw.get(col, "").strip()
-                if val:
-                    payments.append({
-                        "invoice_no":   invoice_no,
-                        "payment_mode": mode,
-                        "cheque_no":    "",     # not in sheet yet
-                        "amount":       val,
-                        "date":         date_raw,
-                    })
-
-            credit = raw.get("Credit Amount", "").strip()
-            if not payments and credit:
-                skipped.append(
-                    f"  ⏭  {invoice_no} — Credit only (Rs.{credit}), skipped"
+    # ── Load rows from CSV or Excel ───────────────────────────────────
+    ext = str(csv_path).lower()
+    if ext.endswith(".xlsx") or ext.endswith(".xls"):
+        try:
+            import openpyxl
+            wb   = openpyxl.load_workbook(csv_path, data_only=True)
+            ws   = wb.active
+            headers = [str(c.value).strip() if c.value else "" for c in ws[1]]
+            raw_rows = []
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                raw_rows.append(
+                    {headers[i]: (str(v).strip() if v is not None else "")
+                     for i, v in enumerate(row)}
                 )
-                continue
+        except ImportError:
+            print("⚠️  openpyxl not installed — falling back to csv reader")
+            raw_rows = []
+    else:
+        # CSV (default)
+        with open(csv_path, newline="", encoding="utf-8-sig") as f:
+            raw_rows = list(csv.DictReader(f))
 
-            if not payments:
-                skipped.append(
-                    f"  ⚠️  {invoice_no} — no payable amount found, skipped"
-                )
-                continue
+    # ── Process rows ──────────────────────────────────────────────────
+    for raw in raw_rows:
+        invoice_no = raw.get("Bill Number", "").strip()
+        date_raw   = raw.get("Bill Date",   "").strip()
 
-            rows.extend(payments)
+        if not invoice_no:
+            continue
+
+        # Capture the date from the first real data row
+        if run_date is None and date_raw:
+            run_date = date_raw
+
+        # Build one entry per non-empty payment column
+        payments = []
+        for col, mode in PAYMENT_MODE_MAP.items():
+            val = raw.get(col, "").strip()
+            if val:
+                payments.append({
+                    "invoice_no":   invoice_no,
+                    "payment_mode": mode,
+                    "cheque_no":    "",     # not in sheet yet
+                    "amount":       val,
+                    "date":         date_raw,
+                })
+
+        credit = raw.get("Credit Amount", "").strip()
+        if not payments and credit:
+            skipped.append(
+                f"  ⏭  {invoice_no} — Credit only (Rs.{credit}), skipped"
+            )
+            continue
+
+        if not payments:
+            skipped.append(
+                f"  ⚠️  {invoice_no} — no payable amount found, skipped"
+            )
+            continue
+
+        rows.extend(payments)
 
     if skipped:
         print("\nSkipped rows:")
@@ -155,6 +190,17 @@ class RetailerPortalEngine:
     # ── LAUNCH & LOGIN ─────────────────────────────────────────────────
     def launch(self):
         print("Launching browser...")
+        # When running as a PyInstaller .exe, the bundled Playwright
+        # looks in the temp extraction folder for browsers — they're not there.
+        # Point it to the user's actual installed browsers location instead.
+        import os, sys
+        if getattr(sys, 'frozen', False):
+            browsers_path = os.path.join(
+                os.environ.get("LOCALAPPDATA", ""),
+                "ms-playwright"
+            )
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = browsers_path
+            print(f"  Browser path: {browsers_path}")
         self.playwright = sync_playwright().start()
         self.browser = self.playwright.chromium.launch(
             headless=self.config.get("headless", False),
@@ -546,11 +592,6 @@ if __name__ == "__main__":
 
             # Navigate using date from the sheet — no manual config needed
             engine.navigate_to_settlement_page(run_date)
-
-            # Test mode — only process the first row
-            if config.get("test_mode", False):
-                rows = rows[:1]
-                print(f"  ⚠️  TEST MODE — processing 1 row only: {rows[0]['invoice_no']} [{rows[0]['payment_mode']}]")
 
             # Process each payment entry
             for row in rows:

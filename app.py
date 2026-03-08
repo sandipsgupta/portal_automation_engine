@@ -61,7 +61,12 @@ class RunLogger:
     COLUMNS = ["timestamp", "invoice_no", "payment_mode", "amount", "status", "notes"]
 
     def __init__(self, portal_id="portal"):
-        self.log_dir  = Path("logs")
+        # When packaged as .exe logs save next to the .exe
+        # When running as script logs save next to app.py
+        import sys as _sys
+        _base = Path(_sys.executable).parent if getattr(_sys, 'frozen', False) \
+                else Path(__file__).parent
+        self.log_dir = _base / "logs"
         self.log_dir.mkdir(exist_ok=True)
         ts            = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_path = self.log_dir / f"run_{portal_id}_{ts}.csv"
