@@ -105,6 +105,15 @@ def load_rows_from_csv(csv_path: str):
         if run_date is None and date_raw:
             run_date = date_raw
 
+        # Resolve payment date — DELIVERY DATE takes priority over Bill Date.
+        # DELIVERY DATE is often short format e.g. '22-Aug'; infer year from Bill Date.
+        bill_year    = _parse_date(date_raw).year if date_raw else datetime.now().year
+        delivery_raw = raw.get("DELIVERY DATE", "").strip()
+        if delivery_raw:
+            payment_date = _parse_date(delivery_raw, ref_year=bill_year).strftime("%d-%m-%Y")
+        else:
+            payment_date = date_raw
+
         # Build one entry per non-empty payment column
         payments = []
         for col, mode in PAYMENT_MODE_MAP.items():
@@ -115,7 +124,7 @@ def load_rows_from_csv(csv_path: str):
                     "payment_mode": mode,
                     "cheque_no":    "",     # not in sheet yet
                     "amount":       val,
-                    "date":         date_raw,
+                    "date":         payment_date,
                 })
 
         credit = raw.get("Credit Amount", "").strip()
@@ -144,15 +153,25 @@ def load_rows_from_csv(csv_path: str):
 # ──────────────────────────────────────────────────────────────────────
 # DATE HELPERS
 # ──────────────────────────────────────────────────────────────────────
-def _parse_date(date_str: str) -> datetime:
-    """Parse any supported date string → datetime object."""
+def _parse_date(date_str: str, ref_year: int = None) -> datetime:
+    """
+    Parse any supported date string → datetime object.
+    ref_year: fallback year used for short formats like '22-Aug' (no year).
+    """
     for fmt in ("%d-%b-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
         try:
             return datetime.strptime(date_str.strip(), fmt)
         except ValueError:
             continue
+    # Short format: DD-Mon (no year) — e.g. '22-Aug' from DELIVERY DATE column
+    try:
+        dt = datetime.strptime(date_str.strip(), "%d-%b")
+        return dt.replace(year=ref_year or datetime.now().year)
+    except ValueError:
+        pass
     raise ValueError(
-        f"Unrecognised date format: '{date_str}'. Use DD-Mon-YYYY e.g. 01-Mar-2026"
+        f"Unrecognised date format: '{date_str}'. "
+        "Supported: DD-Mon-YYYY, DD/MM/YYYY, YYYY-MM-DD, DD-MM-YYYY, DD-Mon"
     )
 
 
