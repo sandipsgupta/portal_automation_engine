@@ -352,6 +352,56 @@ class RetailerPortalEngine:
                 pass
         print("=" * 40)
 
+    # ── ROWS PER PAGE ──────────────────────────────────────────────────
+    def _set_max_rows_per_page(self):
+        """
+        Find the rows-per-page selector and set it to its highest option
+        so all invoices for the day appear in a single table view.
+
+        Salesforce Experience Cloud portals typically render this as a
+        <select> or lightning-combobox near the table footer.
+        Fails silently with a warning so it never blocks a run.
+        """
+        try:
+            # Common selector patterns for Salesforce page-size controls
+            selector = (
+                "select[name='pageSize'], "
+                "select[name='rows'], "
+                "select.slds-select"
+            )
+            ps = self.page.locator(selector).first
+            if ps.count() == 0:
+                ps = self.page.locator("select").filter(
+                    has_text=lambda t: any(d in t for d in ["10", "25", "50"])
+                ).first
+
+            ps.wait_for(state="visible", timeout=5000)
+
+            # Collect all <option> values and pick the largest numeric one
+            options = ps.locator("option").all()
+            best_val = None
+            best_num = -1
+            for opt in options:
+                val = opt.get_attribute("value") or opt.inner_text().strip()
+                try:
+                    n = int(val)
+                    if n > best_num:
+                        best_num = n
+                        best_val = val
+                except ValueError:
+                    pass
+
+            if best_val:
+                ps.select_option(best_val)
+                self.page.wait_for_timeout(2000)
+                self._wait_mask_gone()
+                print(f"  ✅ Rows per page set to {best_val}")
+            else:
+                print("  ⚠️  Rows-per-page selector found but no numeric options detected.")
+
+        except Exception as e:
+            print(f"  ⚠️  Could not set rows per page: {e} — pagination may apply.")
+
     # ── NAVIGATE + SEARCH ──────────────────────────────────────────────
     def navigate_to_settlement_page(self, run_date: str):
         """
@@ -413,6 +463,9 @@ class RetailerPortalEngine:
         self._wait_mask_gone()
         self.page.wait_for_timeout(2000)
         self._wait_mask_gone()
+
+        self._set_max_rows_per_page()
+
         _ss = os.path.join(_screenshots_dir, "01_after_search.png")
         self.page.screenshot(path=_ss, full_page=True)
         print(f"Search complete → {_ss}")
