@@ -474,9 +474,17 @@ class RetailerPortalEngine:
 
         # ── 5. Payment Mode ───────────────────────────────────────────
         print(f"  Selecting payment mode: {payment_mode!r}")
+        self._wait_mask_gone()   # clear any overlay before opening dropdown
         modal.locator("button[name='paymentMode']").click()
-        self.page.wait_for_timeout(500)
-        self.page.get_by_role("option", name=payment_mode, exact=True).click()
+        self.page.wait_for_timeout(800)
+        self._wait_mask_gone()   # clear mask that may close the dropdown
+
+        # filter(has_text) is more robust than exact ARIA name matching in
+        # Salesforce LWC where options may have nested spans / whitespace.
+        # _safe_mouse_click uses bounding box — reliable in Shadow DOM.
+        option = self.page.locator("[role='option']").filter(has_text=payment_mode).first
+        option.wait_for(state="visible", timeout=10000)
+        self._safe_mouse_click(option, label=f"option:{payment_mode}")
         self.page.wait_for_timeout(600)
         print(f"  ✅ Payment Mode: {payment_mode}")
 
