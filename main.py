@@ -8,7 +8,11 @@ import sys
 
 # When packaged as .exe, resolve paths relative to the .exe location
 # When running as script, resolve relative to main.py
-_base = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False)         else os.path.dirname(os.path.abspath(__file__))
+_base = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) \
+        else os.path.dirname(os.path.abspath(__file__))
+
+_screenshots_dir = os.path.join(_base, "screenshots")
+os.makedirs(_screenshots_dir, exist_ok=True)
 
 # Load .env from the same folder as the .exe / script
 load_dotenv(os.path.join(_base, ".env"))
@@ -21,14 +25,7 @@ PASSWORD = os.getenv("PORTAL_PASSWORD")
 # CONFIG
 # ──────────────────────────────────────────────────────────────────────
 def load_config():
-    import sys
-    # When packaged as .exe, load config.json from next to the .exe
-    # When running as script, load from next to main.py
-    if getattr(sys, 'frozen', False):
-        base = os.path.dirname(sys.executable)
-    else:
-        base = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(base, "config.json")
+    config_path = os.path.join(_base, "config.json")
     with open(config_path) as f:
         return json.load(f)
 
@@ -193,7 +190,6 @@ class RetailerPortalEngine:
         # When running as a PyInstaller .exe, the bundled Playwright
         # looks in the temp extraction folder for browsers — they're not there.
         # Point it to the user's actual installed browsers location instead.
-        import os, sys
         if getattr(sys, 'frozen', False):
             browsers_path = os.path.join(
                 os.environ.get("LOCALAPPDATA", ""),
@@ -368,7 +364,7 @@ class RetailerPortalEngine:
         print(f"Navigating to settlement page (date: {portal_date})...")
 
         self.page.goto(
-            "https://mavic-tataconsumer.my.site.com/dms/s/manual-invoice-payment-settlement",
+            self.config["settlement_url"],
             wait_until="domcontentloaded"
         )
         self.page.locator("label", has_text="Invoice From Date").first.wait_for(timeout=30000)
@@ -417,8 +413,9 @@ class RetailerPortalEngine:
         self._wait_mask_gone()
         self.page.wait_for_timeout(2000)
         self._wait_mask_gone()
-        self.page.screenshot(path="01_after_search.png", full_page=True)
-        print("Search complete → 01_after_search.png")
+        _ss = os.path.join(_screenshots_dir, "01_after_search.png")
+        self.page.screenshot(path=_ss, full_page=True)
+        print(f"Search complete → {_ss}")
 
     # ── FILL ONE ROW ───────────────────────────────────────────────────
     def fill_one_row(self, invoice_no, payment_mode, cheque_no, amount, date):
@@ -522,15 +519,21 @@ class RetailerPortalEngine:
 
         if add_payment_btn.is_disabled():
             print("  ⚠️  'Add Payment' still DISABLED — a field may be invalid.")
-            self.page.screenshot(path=f"DISABLED_{invoice_no}.png", full_page=False)
-            input("  ⏸  Fix in browser if needed, then press Enter...")
+            _ss = os.path.join(_screenshots_dir, f"DISABLED_{invoice_no}.png")
+            self.page.screenshot(path=_ss, full_page=False)
+            print(f"  📸 {_ss} saved.")
+            raise RuntimeError(
+                f"'Add Payment' button disabled for {invoice_no} [{payment_mode}] — "
+                "check the modal fields. Screenshot saved."
+            )
         else:
             self._safe_mouse_click(add_payment_btn, label="Add Payment")
             self.page.wait_for_timeout(800)
 
         # ── 10. Screenshot before saving ──────────────────────────────
-        self.page.screenshot(path=f"02_modal_{invoice_no}_{payment_mode}.png", full_page=False)
-        print(f"  📸 02_modal_{invoice_no}_{payment_mode}.png saved.")
+        _ss = os.path.join(_screenshots_dir, f"02_modal_{invoice_no}_{payment_mode}.png")
+        self.page.screenshot(path=_ss, full_page=False)
+        print(f"  📸 {_ss} saved.")
 
         # ── 11. Save inside modal ──────────────────────────────────────
         save_btn = modal.get_by_role("button", name="Save", exact=True)
@@ -542,8 +545,9 @@ class RetailerPortalEngine:
         self._wait_mask_gone()
         self.page.wait_for_timeout(1000)
 
-        self.page.screenshot(path=f"03_done_{invoice_no}_{payment_mode}.png", full_page=True)
-        print(f"  ✅ Done → 03_done_{invoice_no}_{payment_mode}.png saved.")
+        _ss = os.path.join(_screenshots_dir, f"03_done_{invoice_no}_{payment_mode}.png")
+        self.page.screenshot(path=_ss, full_page=True)
+        print(f"  ✅ Done → {_ss} saved.")
 
     # ── FINAL PAGE SAVE ────────────────────────────────────────────────
     def save_page(self):
@@ -555,8 +559,9 @@ class RetailerPortalEngine:
         save_btn.click()
         self.page.wait_for_timeout(3000)
         self._wait_mask_gone()
-        self.page.screenshot(path="04_final_save.png", full_page=True)
-        print("✅ Final Save complete → 04_final_save.png saved.")
+        _ss = os.path.join(_screenshots_dir, "04_final_save.png")
+        self.page.screenshot(path=_ss, full_page=True)
+        print(f"✅ Final Save complete → {_ss} saved.")
 
     def close(self):
         print("Closing browser...")
@@ -622,8 +627,9 @@ if __name__ == "__main__":
         print("\n❌ Error:", e)
         traceback.print_exc()
         try:
-            engine.page.screenshot(path="ERROR_state.png", full_page=True)
-            print("📸 ERROR_state.png saved.")
+            _ss = os.path.join(_screenshots_dir, "ERROR_state.png")
+            engine.page.screenshot(path=_ss, full_page=True)
+            print(f"📸 {_ss} saved.")
         except Exception:
             pass
         input("\nBrowser kept open. Press Enter to close...")

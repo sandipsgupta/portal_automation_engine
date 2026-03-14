@@ -8,12 +8,15 @@ import os
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, font, messagebox, scrolledtext
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from main import RetailerPortalEngine, load_config, load_rows_from_csv
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -550,79 +553,78 @@ class PortalAutomationApp(tk.Tk):
         sys.stdout = sys.stderr = writer
 
         try:
-            from main import RetailerPortalEngine, load_config, load_rows_from_csv
-
             config               = load_config()
             config["sheet_path"] = self._sheet_path.get()
             config["headless"]   = self._headless.get()
             config["debug"]      = self._debug.get()
 
             engine = RetailerPortalEngine(config)
-            engine.launch()
-            engine.login()
+            try:
+                engine.launch()
+                engine.login()
 
-            rows, run_date = load_rows_from_csv(config["sheet_path"])
+                rows, run_date = load_rows_from_csv(config["sheet_path"])
 
-            if not rows:
-                print("⚠️  No processable rows found in sheet.")
-            else:
-                print(f"\nDate from sheet  : {run_date}")
-                print(f"Entries to process: {len(rows)}")
-                for r in rows:
-                    print(f"  {r['invoice_no']}  {r['payment_mode']:8}  Rs.{r['amount']}")
+                if not rows:
+                    print("⚠️  No processable rows found in sheet.")
+                else:
+                    print(f"\nDate from sheet  : {run_date}")
+                    print(f"Entries to process: {len(rows)}")
+                    for r in rows:
+                        print(f"  {r['invoice_no']}  {r['payment_mode']:8}  Rs.{r['amount']}")
 
-                engine.navigate_to_settlement_page(run_date)
+                    engine.navigate_to_settlement_page(run_date)
 
-                for row in rows:
-                    if not self._running:
-                        print("\n⏹  Run stopped by user.")
-                        self._run_logger.record(status="STOPPED")
-                        break
-                    try:
-                        engine.fill_one_row(
-                            invoice_no   = row["invoice_no"],
-                            payment_mode = row["payment_mode"],
-                            cheque_no    = row.get("cheque_no", ""),
-                            amount       = row["amount"],
-                            date         = row["date"],
-                        )
-                        self._run_logger.record(
-                            invoice_no   = row["invoice_no"],
-                            payment_mode = row["payment_mode"],
-                            amount       = row["amount"],
-                            status       = "✅ saved",
-                        )
-                    except Exception as row_err:
-                        print(f"  ❌ Row error: {row_err}")
-                        self._run_logger.record(
-                            invoice_no   = row["invoice_no"],
-                            payment_mode = row["payment_mode"],
-                            amount       = row["amount"],
-                            status       = "❌ error",
-                            notes        = str(row_err),
-                        )
-
-                if self._running:
-                    print("\n✅ All entries processed.")
-                    print("\n" + "="*55)
-                    print("  ⏸  Review the table in the browser.")
-                    print("  Final Save in 5 seconds...")
-                    print("="*55)
-                    import time
-                    for i in range(5, 0, -1):
+                    for row in rows:
                         if not self._running:
+                            print("\n⏹  Run stopped by user.")
+                            self._run_logger.record(status="STOPPED")
                             break
-                        print(f"  Saving in {i}s...")
-                        time.sleep(1)
+                        try:
+                            engine.fill_one_row(
+                                invoice_no   = row["invoice_no"],
+                                payment_mode = row["payment_mode"],
+                                cheque_no    = row.get("cheque_no", ""),
+                                amount       = row["amount"],
+                                date         = row["date"],
+                            )
+                            self._run_logger.record(
+                                invoice_no   = row["invoice_no"],
+                                payment_mode = row["payment_mode"],
+                                amount       = row["amount"],
+                                status       = "✅ saved",
+                            )
+                        except Exception as row_err:
+                            print(f"  ❌ Row error: {row_err}")
+                            self._run_logger.record(
+                                invoice_no   = row["invoice_no"],
+                                payment_mode = row["payment_mode"],
+                                amount       = row["amount"],
+                                status       = "❌ error",
+                                notes        = str(row_err),
+                            )
 
                     if self._running:
-                        engine.save_page()
-                        self._run_logger.record(
-                            status="✅ FINAL SAVE",
-                            notes="Page-level save complete"
-                        )
+                        print("\n✅ All entries processed.")
+                        print("\n" + "="*55)
+                        print("  ⏸  Review the table in the browser.")
+                        print("  Final Save in 5 seconds...")
+                        print("="*55)
+                        for i in range(5, 0, -1):
+                            if not self._running:
+                                break
+                            print(f"  Saving in {i}s...")
+                            time.sleep(1)
 
-            engine.close()
+                        if self._running:
+                            engine.save_page()
+                            self._run_logger.record(
+                                status="✅ FINAL SAVE",
+                                notes="Page-level save complete"
+                            )
+            finally:
+                engine.close()
+
             print("\n✅ Run complete.")
             self._run_logger.record(
                 status="RUN COMPLETE",
@@ -649,7 +651,7 @@ class PortalAutomationApp(tk.Tk):
         self._running = False
         self._run_btn.config(state="normal")
         self._stop_btn.config(
-            state="disabled", bg="#6B2020", fg="#AAAAAA", cursor="arrow"
+            state="disabled", bg="#999999", fg="white", cursor="arrow"
         )
         self._set_status("● Idle")
         if self._run_logger:

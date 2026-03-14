@@ -1,5 +1,6 @@
 {
   "portal_url": "https://mavic-tataconsumer.my.site.com/dms/s/login/",
+  "settlement_url": "https://mavic-tataconsumer.my.site.com/dms/s/manual-invoice-payment-settlement",
   "headless": false,
   "debug": false,
   "sheet_path": "",
