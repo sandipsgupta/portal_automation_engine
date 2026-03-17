@@ -613,6 +613,20 @@ class RetailerPortalEngine:
             label="Date"
         )
 
+        # ── 8b. Transaction ID — required field, default "1" ──────────
+        txn_input = modal.locator(
+            "input[name='transactionId'], "
+            "input[name='transaction_id'], "
+            "input[name='txnId'], "
+            "input[name='txn_id'], "
+            "input[placeholder*='ransaction']"
+        ).first
+        try:
+            if txn_input.is_visible(timeout=3000):
+                self._clear_and_fill(txn_input, "1", "Transaction ID")
+        except Exception:
+            pass  # field not present for this payment mode — skip
+
         if debug:
             self.debug_modal_fields(modal, tag="after-fill")
 
