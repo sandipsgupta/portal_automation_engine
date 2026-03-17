@@ -105,24 +105,39 @@ def load_rows_from_csv(csv_path: str):
         if run_date is None and date_raw:
             run_date = date_raw
 
-        # Resolve payment date — DELIVERY DATE takes priority over Bill Date.
-        # DELIVERY DATE is often short format e.g. '22-Aug'; infer year from Bill Date.
-        bill_year    = _parse_date(date_raw).year if date_raw else datetime.now().year
-        delivery_raw = raw.get("DELIVERY DATE", "").strip()
-        if delivery_raw:
-            payment_date = _parse_date(delivery_raw, ref_year=bill_year).strftime("%d-%m-%Y")
-        else:
-            payment_date = date_raw
+        # ── Resolve dates ─────────────────────────────────────────────
+        # Bill Date is informational only — never used as a payment date.
+        # DELIVERY DATE is used for Cash and UPI.
+        # CHEQUE DATE is used for Cheque, falls back to DELIVERY DATE.
+        bill_year       = _parse_date(date_raw).year if date_raw else datetime.now().year
+        delivery_raw    = raw.get("DELIVERY DATE",  "").strip()
+        cheque_date_raw = raw.get("CHEQUE DATE",    "").strip()
+        cheque_no_raw   = raw.get("CHEQUE NUMBER",  "").strip()
+
+        delivery_date = (
+            _parse_date(delivery_raw, ref_year=bill_year).strftime("%d-%m-%Y")
+            if delivery_raw else ""
+        )
+        cheque_date = (
+            _parse_date(cheque_date_raw, ref_year=bill_year).strftime("%d-%m-%Y")
+            if cheque_date_raw else delivery_date
+        )
 
         # Build one entry per non-empty payment column
         payments = []
         for col, mode in PAYMENT_MODE_MAP.items():
             val = raw.get(col, "").strip()
             if val:
+                payment_date = cheque_date if mode == "Cheque" else delivery_date
+                if not payment_date:
+                    skipped.append(
+                        f"  ⚠️  {invoice_no} [{mode}] — no payment date found, skipped"
+                    )
+                    continue
                 payments.append({
                     "invoice_no":   invoice_no,
                     "payment_mode": mode,
-                    "cheque_no":    "",     # not in sheet yet
+                    "cheque_no":    cheque_no_raw if mode == "Cheque" else "",
                     "amount":       val,
                     "date":         payment_date,
                 })
