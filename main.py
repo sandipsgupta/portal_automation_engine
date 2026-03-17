@@ -413,9 +413,15 @@ class RetailerPortalEngine:
             )
             ps = self.page.locator(selector).first
             if ps.count() == 0:
-                ps = self.page.locator("select").filter(
-                    has_text=lambda t: any(d in t for d in ["10", "25", "50"])
-                ).first
+                # Fallback: find any <select> whose options include numeric page sizes
+                ps = None
+                for sel in self.page.locator("select").all():
+                    opts = [o.inner_text().strip() for o in sel.locator("option").all()]
+                    if any(o.isdigit() for o in opts):
+                        ps = sel
+                        break
+                if ps is None:
+                    raise RuntimeError("no rows-per-page selector found")
 
             ps.wait_for(state="visible", timeout=5000)
 
@@ -522,20 +528,41 @@ class RetailerPortalEngine:
 
         debug = self.config.get("debug", False)
 
-        # ── 1. Find the matching table row ────────────────────────────
+        # ── 1. Find the matching table row (with pagination) ──────────
         # wait_for_selector() uses CSS and cannot pierce LWC Shadow DOM.
         # Use Playwright locator.wait_for() instead — shadow-DOM aware.
-        rows = self.page.locator("table tbody tr")
-        rows.first.wait_for(state="visible", timeout=30000)
-        row_count = rows.count()
-        print(f"  Rows in table: {row_count}")
-
         target_row = None
-        for i in range(row_count):
-            row = rows.nth(i)
-            if invoice_no in row.inner_text():
-                target_row = row
-                print(f"  ✅ Matched row {i}")
+        page_num = 1
+        while True:
+            rows = self.page.locator("table tbody tr")
+            rows.first.wait_for(state="visible", timeout=30000)
+            row_count = rows.count()
+            print(f"  Rows in table: {row_count} (page {page_num})")
+
+            for i in range(row_count):
+                row = rows.nth(i)
+                if invoice_no in row.inner_text():
+                    target_row = row
+                    print(f"  ✅ Matched row {i} (page {page_num})")
+                    break
+
+            if target_row is not None:
+                break
+
+            # Try to go to next page
+            next_btn = self.page.locator(
+                "button[title='Next Page'], button[name='next'], "
+                "a[title='Next'], lightning-primitive-icon[alternative-text='Next']"
+            ).first
+            try:
+                if next_btn.is_visible(timeout=2000) and not next_btn.is_disabled():
+                    next_btn.click()
+                    self.page.wait_for_timeout(2000)
+                    self._wait_mask_gone()
+                    page_num += 1
+                else:
+                    break
+            except Exception:
                 break
 
         if target_row is None:
