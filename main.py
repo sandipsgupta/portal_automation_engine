@@ -1,10 +1,15 @@
 import csv
 import json
 import os
+import sys
 from datetime import datetime
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
-import sys
+
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
 
 # When packaged as .exe, resolve paths relative to the .exe location
 # When running as script, resolve relative to main.py
@@ -74,8 +79,10 @@ def load_rows_from_csv(csv_path: str):
     # ── Load rows from CSV or Excel ───────────────────────────────────
     ext = str(csv_path).lower()
     if ext.endswith(".xlsx") or ext.endswith(".xls"):
-        try:
-            import openpyxl
+        if openpyxl is None:
+            print("⚠️  openpyxl not available — cannot read .xlsx files")
+            raw_rows = []
+        else:
             wb   = openpyxl.load_workbook(csv_path, data_only=True)
             ws   = wb.active
             headers = [str(c.value).strip() if c.value else "" for c in ws[1]]
@@ -85,9 +92,6 @@ def load_rows_from_csv(csv_path: str):
                     {headers[i]: (str(v).strip() if v is not None else "")
                      for i, v in enumerate(row)}
                 )
-        except ImportError:
-            print("⚠️  openpyxl not installed — falling back to csv reader")
-            raw_rows = []
     else:
         # CSV (default)
         with open(csv_path, newline="", encoding="utf-8-sig") as f:
