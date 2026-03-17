@@ -172,12 +172,16 @@ def load_rows_from_csv(csv_path: str):
 # ──────────────────────────────────────────────────────────────────────
 # DATE HELPERS
 # ──────────────────────────────────────────────────────────────────────
-def _parse_date(date_str: str, ref_year: int = None) -> datetime:
+def _parse_date(date_str, ref_year: int = None) -> datetime:
     """
     Parse any supported date string → datetime object.
     ref_year: fallback year used for short formats like '22-Aug' (no year).
+    Also accepts datetime objects directly (as returned by openpyxl).
     """
-    for fmt in ("%d-%b-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+    if isinstance(date_str, datetime):
+        return date_str
+    date_str = str(date_str).strip()
+    for fmt in ("%d-%b-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%Y-%m-%d %H:%M:%S"):
         try:
             return datetime.strptime(date_str.strip(), fmt)
         except ValueError:
