@@ -138,11 +138,16 @@ def load_rows_from_csv(csv_path: str):
                         f"  ⚠️  {invoice_no} [{mode}] — no payment date found, skipped"
                     )
                     continue
+                # Normalise float-like strings: "263.0" → "263"
+                try:
+                    amount_str = str(int(float(val)))
+                except (ValueError, OverflowError):
+                    amount_str = val
                 payments.append({
                     "invoice_no":   invoice_no,
                     "payment_mode": mode,
                     "cheque_no":    cheque_no_raw if mode == "Cheque" else "",
-                    "amount":       val,
+                    "amount":       amount_str,
                     "date":         payment_date,
                 })
 
