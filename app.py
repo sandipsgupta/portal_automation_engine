@@ -112,7 +112,40 @@ class QueueWriter:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# GUI
+# GUI helpers
+# ──────────────────────────────────────────────────────────────────────
+class ToggleSwitch(tk.Canvas):
+    """A pill-shaped toggle switch bound to a tk.BooleanVar."""
+
+    W, H, R = 44, 24, 11   # width, height, knob radius
+
+    def __init__(self, parent, variable, on_color="#5B2D8E",
+                 off_color="#CCCCCC", bg="#FFFFFF", **kw):
+        super().__init__(parent, width=self.W, height=self.H,
+                         bg=bg, highlightthickness=0, **kw)
+        self._var      = variable
+        self._on_color = on_color
+        self._off_color = off_color
+        self._draw()
+        self._var.trace_add("write", lambda *_: self._draw())
+        self.bind("<Button-1>", lambda _: self._var.set(not self._var.get()))
+
+    def _draw(self):
+        self.delete("all")
+        on   = self._var.get()
+        fill = self._on_color if on else self._off_color
+        r, w, h = self.R, self.W, self.H
+        # pill background
+        self.create_oval(0, 0, h, h, fill=fill, outline="")
+        self.create_oval(w - h, 0, w, h, fill=fill, outline="")
+        self.create_rectangle(h // 2, 0, w - h // 2, h, fill=fill, outline="")
+        # knob
+        kx = w - h // 2 - 1 if on else h // 2 + 1
+        ky = h // 2
+        self.create_oval(kx - r, ky - r, kx + r, ky + r,
+                         fill="white", outline="")
+
+
 # ──────────────────────────────────────────────────────────────────────
 class PortalAutomationApp(tk.Tk):
 
@@ -265,24 +298,24 @@ class PortalAutomationApp(tk.Tk):
         toggle_frame = tk.Frame(panel, bg=self.PANEL_BG)
         toggle_frame.grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
-        tk.Checkbutton(
-            toggle_frame,
-            text="Run headless (hide browser)",
-            variable=self._headless,
-            bg=self.PANEL_BG, fg=self.TEXT,
-            font=("Segoe UI", 10),
-            activebackground=self.PANEL_BG,
-            selectcolor=self.PANEL_BG,
+        # Headless toggle
+        ToggleSwitch(
+            toggle_frame, variable=self._headless,
+            on_color=self.ACCENT, bg=self.PANEL_BG,
+        ).pack(side="left", padx=(0, 6))
+        tk.Label(
+            toggle_frame, text="Run headless (hide browser)",
+            bg=self.PANEL_BG, fg=self.TEXT, font=("Segoe UI", 10),
         ).pack(side="left", padx=(0, 20))
 
-        tk.Checkbutton(
-            toggle_frame,
-            text="Debug mode",
-            variable=self._debug,
-            bg=self.PANEL_BG, fg=self.TEXT,
-            font=("Segoe UI", 10),
-            activebackground=self.PANEL_BG,
-            selectcolor=self.PANEL_BG,
+        # Debug toggle
+        ToggleSwitch(
+            toggle_frame, variable=self._debug,
+            on_color=self.ACCENT, bg=self.PANEL_BG,
+        ).pack(side="left", padx=(0, 6))
+        tk.Label(
+            toggle_frame, text="Debug mode",
+            bg=self.PANEL_BG, fg=self.TEXT, font=("Segoe UI", 10),
         ).pack(side="left")
 
         panel.columnconfigure(1, weight=1)
