@@ -1,0 +1,6 @@
+timestamp,invoice_no,payment_mode,amount,status,notes
+2026-04-01 22:58:33,,,,RUN STARTED,Sheet: C:/Users/sandi/OneDrive/Desktop/TATA SHIPMENTS_April - Copy.xlsx
+2026-04-01 22:59:17,,,,❌ FATAL ERROR,"Locator.wait_for: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator(""label"").filter(has_text=""Invoice From Date"").first to be visible
+"

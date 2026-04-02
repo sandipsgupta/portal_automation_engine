@@ -1,0 +1,8 @@
+timestamp,invoice_no,payment_mode,amount,status,notes
+2026-04-01 23:07:20,,,,RUN STARTED,Sheet: C:/Users/sandi/OneDrive/Desktop/TATA SHIPMENTS_April - Copy.xlsx
+2026-04-01 23:07:49,IN17781826017005,Cash,1783,✅ saved,
+2026-04-01 23:07:51,IN17781826017009,Cash,831,✅ saved,
+2026-04-01 23:07:53,IN17781826017010,Cash,15963,✅ saved,
+2026-04-01 23:08:05,IN17781826017012,UPI,3149,✅ saved,
+2026-04-01 23:08:13,,,,✅ FINAL SAVE,Page-level save complete
+2026-04-01 23:08:14,,,,RUN COMPLETE,CSV log: D:\projects\portal_automation_engine\logs\run_tata_consumer_20260401_230720.csv
