@@ -214,9 +214,9 @@ def to_portal_filter_date(date_str: str) -> str:
 def to_slds_date(date_str: str) -> str:
     """
     Format for the modal's payDate text input (SLDS date picker).
-    Salesforce en-US locale expects MM/DD/YYYY.
+    Portal expects DD/MM/YYYY format.
     """
-    return _parse_date(date_str).strftime("%m/%d/%Y")
+    return _parse_date(date_str).strftime("%d/%m/%Y")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -584,7 +584,34 @@ class RetailerPortalEngine:
         target_row.scroll_into_view_if_needed()
         self.page.wait_for_timeout(800)
 
-        # ── 3. Click row-level "Add Collections" (+) button ───────────
+        # ── 3. Handle Cash payments: enter directly in table row ───────
+        if payment_mode == "Cash":
+            print("  Entering Cash payment directly in table row...")
+            try:
+                # Find the Cash column index
+                header_cells = self.page.locator("table thead tr th")
+                cash_col_index = -1
+                for i in range(header_cells.count()):
+                    if "Cash".lower() in header_cells.nth(i).inner_text().lower():
+                        cash_col_index = i
+                        break
+
+                if cash_col_index == -1:
+                    raise RuntimeError("Cash column not found in table")
+
+                # Get the Cash cell for this row and fill it
+                cash_cell = target_row.locator("td").nth(cash_col_index)
+                cash_input = cash_cell.locator("input").first
+                self._clear_and_fill(cash_input, amount, "Cash Amount")
+                self.page.wait_for_timeout(800)
+                print(f"  ✅ Cash payment entered directly: Rs.{amount}")
+                return
+
+            except Exception as e:
+                print(f"  ⚠️  Failed to enter Cash directly: {e} — falling back to modal")
+                # Continue to modal flow as fallback
+
+        # ── 3b. Click row-level "Add Collections" (+) button ───────────
         row_add_btn = target_row.locator("button").first
         self._safe_mouse_click(row_add_btn, label="row + (Add Collections)")
         self.page.wait_for_timeout(2000)
