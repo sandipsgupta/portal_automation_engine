@@ -596,46 +596,50 @@ class PortalAutomationApp(tk.Tk):
                 engine.launch()
                 engine.login()
 
-                rows, run_date = load_rows_from_csv(config["sheet_path"])
+                rows, from_date, to_date = load_rows_from_csv(config["sheet_path"])
 
                 if not rows:
                     print("⚠️  No processable rows found in sheet.")
                 else:
-                    print(f"\nDate from sheet  : {run_date}")
+                    if from_date == to_date:
+                        print(f"\nDate from sheet   : {from_date}")
+                    else:
+                        print(f"\nDate range        : {from_date}  →  {to_date}")
                     print(f"Entries to process: {len(rows)}")
                     for r in rows:
                         print(f"  {r['invoice_no']}  {r['payment_mode']:8}  Rs.{r['amount']}")
 
-                    engine.navigate_to_settlement_page(run_date)
+                    engine.navigate_to_settlement_page(from_date, to_date)
 
+                    # Group flat payment list by invoice_no (preserving order)
+                    invoices = {}
                     for row in rows:
+                        invoices.setdefault(row["invoice_no"], []).append(row)
+
+                    for invoice_no, payments in invoices.items():
                         if not self._running:
                             print("\n⏹  Run stopped by user.")
                             self._run_logger.record(status="STOPPED")
                             break
                         try:
-                            engine.fill_one_row(
-                                invoice_no   = row["invoice_no"],
-                                payment_mode = row["payment_mode"],
-                                cheque_no    = row.get("cheque_no", ""),
-                                amount       = row["amount"],
-                                date         = row["date"],
-                            )
-                            self._run_logger.record(
-                                invoice_no   = row["invoice_no"],
-                                payment_mode = row["payment_mode"],
-                                amount       = row["amount"],
-                                status       = "✅ saved",
-                            )
-                        except Exception as row_err:
-                            print(f"  ❌ Row error: {row_err}")
-                            self._run_logger.record(
-                                invoice_no   = row["invoice_no"],
-                                payment_mode = row["payment_mode"],
-                                amount       = row["amount"],
-                                status       = "❌ error",
-                                notes        = str(row_err),
-                            )
+                            engine.fill_invoice(invoice_no, payments)
+                            for p in payments:
+                                self._run_logger.record(
+                                    invoice_no   = invoice_no,
+                                    payment_mode = p["payment_mode"],
+                                    amount       = p["amount"],
+                                    status       = "✅ saved",
+                                )
+                        except Exception as inv_err:
+                            print(f"  ❌ Invoice error: {inv_err}")
+                            for p in payments:
+                                self._run_logger.record(
+                                    invoice_no   = invoice_no,
+                                    payment_mode = p["payment_mode"],
+                                    amount       = p["amount"],
+                                    status       = "❌ error",
+                                    notes        = str(inv_err),
+                                )
 
                     if self._running:
                         print("\n✅ All entries processed.")

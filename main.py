@@ -63,18 +63,23 @@ def load_rows_from_csv(csv_path: str):
                   Credit Amount
 
     Returns:
-        rows     — list of payment entry dicts to process
-        run_date — the Bill Date from the sheet (DD-MM-YYYY),
-                   used to auto-set the portal date filter
+        rows      — list of payment entry dicts to process
+        from_date — earliest delivery/cheque date in sheet (DD-MM-YYYY),
+                    used for the portal Invoice From Date filter
+        to_date   — latest delivery/cheque date in sheet (DD-MM-YYYY),
+                    used for the portal Invoice To Date filter
 
     Rules:
       - Credit-only rows are SKIPPED (separate Add Credit Note flow)
       - Split payments (Cash + UPI on same row) produce TWO entries
       - Rows with no payable amount are skipped with a warning
+      - from_date/to_date span ALL delivery dates in the sheet, not just
+        the first row — supports multi-date sheets
     """
     rows     = []
     skipped  = []
-    run_date = None
+    run_date = None   # bill date of first row (fallback only)
+    date_set = set()  # all delivery/cheque dates seen across all rows
 
     # ── Load rows from CSV or Excel ───────────────────────────────────
     ext = str(csv_path).lower()
@@ -127,6 +132,12 @@ def load_rows_from_csv(csv_path: str):
             if cheque_date_raw else delivery_date
         )
 
+        # Collect all payment dates to derive the portal filter range
+        if delivery_date:
+            date_set.add(_parse_date(delivery_date))
+        if cheque_date and cheque_date != delivery_date:
+            date_set.add(_parse_date(cheque_date))
+
         # Build one entry per non-empty payment column
         payments = []
         for col, mode in PAYMENT_MODE_MAP.items():
@@ -171,7 +182,14 @@ def load_rows_from_csv(csv_path: str):
         for s in skipped:
             print(s)
 
-    return rows, run_date
+    # Derive portal date filter range from all payment dates seen
+    if date_set:
+        from_date = min(date_set).strftime("%d-%m-%Y")
+        to_date   = max(date_set).strftime("%d-%m-%Y")
+    else:
+        from_date = to_date = run_date  # fallback to bill date of first row
+
+    return rows, from_date, to_date
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -455,16 +473,59 @@ class RetailerPortalEngine:
         except Exception as e:
             print(f"  ⚠️  Could not set rows per page: {e} — pagination may apply.")
 
+    # ── FIRST PAGE ─────────────────────────────────────────────────────
+    def _go_to_first_page(self):
+        """
+        Reset the portal table to page 1 before each invoice search.
+        Needed because after a modal save the portal may land on any page,
+        and the search loop is forward-only — it cannot look backwards.
+
+        Tries the 'First Page' button first; falls back to clicking
+        'Previous Page' repeatedly until it becomes disabled.
+        Fails silently — if pagination controls are absent the table is
+        already a single page and no action is needed.
+        """
+        first_btn = self.page.locator(
+            "button[title='First Page'], button[name='first']"
+        ).first
+        try:
+            if first_btn.is_visible(timeout=2000) and not first_btn.is_disabled():
+                first_btn.click()
+                self.page.wait_for_timeout(1500)
+                self._wait_mask_gone()
+                return
+        except Exception:
+            pass
+
+        # Fallback: click Previous Page until it is disabled
+        for _ in range(20):   # safety cap — prevents infinite loop
+            prev_btn = self.page.locator(
+                "button[title='Previous Page'], button[name='previous']"
+            ).first
+            try:
+                if prev_btn.is_visible(timeout=1000) and not prev_btn.is_disabled():
+                    prev_btn.click()
+                    self.page.wait_for_timeout(1000)
+                    self._wait_mask_gone()
+                else:
+                    break
+            except Exception:
+                break
+
     # ── NAVIGATE + SEARCH ──────────────────────────────────────────────
-    def navigate_to_settlement_page(self, run_date: str):
+    def navigate_to_settlement_page(self, from_date: str, to_date: str):
         """
-        run_date: DD-MM-YYYY string auto-read from the CSV.
-        Converted to DD-Mon-YYYY for the portal filter inputs.
-        Same date used for both from_date and to_date (client preps
-        one day's sheet at a time).
+        from_date / to_date: DD-MM-YYYY strings derived from all delivery
+        dates in the sheet.  Converted to DD-Mon-YYYY for the portal filter.
+        When the sheet covers a single day both values are the same.
+        When the sheet spans multiple days the range loads all relevant invoices.
         """
-        portal_date = to_portal_filter_date(run_date)
-        print(f"Navigating to settlement page (date: {portal_date})...")
+        portal_from = to_portal_filter_date(from_date)
+        portal_to   = to_portal_filter_date(to_date)
+        if portal_from == portal_to:
+            print(f"Navigating to settlement page (date: {portal_from})...")
+        else:
+            print(f"Navigating to settlement page ({portal_from} → {portal_to})...")
 
         self.page.goto(
             self.config["settlement_url"],
@@ -475,13 +536,13 @@ class RetailerPortalEngine:
         self.page.wait_for_timeout(500)
         print("Settlement page loaded.")
 
-        # Fill date filter — same date for from and to
+        # Fill date filter with the full range from the sheet
         self.page.locator("input[name='invoiceFromDate']").click()
-        self.page.locator("input[name='invoiceFromDate']").fill(portal_date)
+        self.page.locator("input[name='invoiceFromDate']").fill(portal_from)
         self.page.keyboard.press("Tab")
 
         self.page.locator("input[name='invoiceToDate']").click()
-        self.page.locator("input[name='invoiceToDate']").fill(portal_date)
+        self.page.locator("input[name='invoiceToDate']").fill(portal_to)
         self.page.keyboard.press("Tab")
 
         self.page.wait_for_timeout(500)
@@ -523,29 +584,47 @@ class RetailerPortalEngine:
         self.page.screenshot(path=_ss, full_page=True)
         print(f"Search complete → {_ss}")
 
-    # ── FILL ONE ROW ───────────────────────────────────────────────────
-    def fill_one_row(self, invoice_no, payment_mode, cheque_no, amount, date):
-        print(f"\n{'─'*55}")
-        print(f"Processing: {invoice_no}  [{payment_mode}  Rs.{amount}]")
+    # ── FILL ONE INVOICE (all payment modes in one pass) ──────────────
+    def fill_invoice(self, invoice_no: str, payments: list):
+        """
+        Process every payment entry for a single invoice in one pass:
 
-        slds_date = to_slds_date(date)
-        print(f"  Date: {date!r} → {slds_date!r} (MM/DD/YYYY for portal)")
+          1. Find the invoice row in the table (from page 1, pages forward)
+          2. If Cash is present → fill the Cash cell directly in the table
+             (no modal needed)
+          3. For each remaining payment (UPI, Cheque, …):
+               - click the row (+) button → modal opens
+               - fill Payment Mode, optional Cheque No, Amount, Date, Txn ID
+               - click Add Payment → click Save → wait for modal to close
+               - re-locate the row (LWC may re-render after save)
+          4. Screenshot when all payments for this invoice are done
+
+        payments: list of dicts — keys: payment_mode, cheque_no, amount, date
+                  Cash entry (if any) should be first in the list.
+        """
+        print(f"\n{'─'*55}")
+        modes_summary = "  |  ".join(
+            f"{p['payment_mode']} Rs.{p['amount']}" for p in payments
+        )
+        print(f"Processing: {invoice_no}  [{modes_summary}]")
 
         debug = self.config.get("debug", False)
 
-        # ── 1. Find the matching table row (with pagination) ──────────
-        # wait_for_selector() uses CSS and cannot pierce LWC Shadow DOM.
-        # Use Playwright locator.wait_for() instead — shadow-DOM aware.
+        # ── 1. Find the invoice row — always start from page 1 ────────
+        # Reset to page 1 so the forward-only search never misses a row
+        # that sits on a page the engine already passed.
+        self._go_to_first_page()
+
         target_row = None
-        page_num = 1
+        page_num   = 1
         while True:
-            rows = self.page.locator("table tbody tr")
-            rows.first.wait_for(state="visible", timeout=30000)
-            row_count = rows.count()
+            tbl_rows = self.page.locator("table tbody tr")
+            tbl_rows.first.wait_for(state="visible", timeout=30000)
+            row_count = tbl_rows.count()
             print(f"  Rows in table: {row_count} (page {page_num})")
 
             for i in range(row_count):
-                row = rows.nth(i)
+                row = tbl_rows.nth(i)
                 if invoice_no in row.inner_text():
                     target_row = row
                     print(f"  ✅ Matched row {i} (page {page_num})")
@@ -554,7 +633,7 @@ class RetailerPortalEngine:
             if target_row is not None:
                 break
 
-            # Try to go to next page
+            # Advance to next page
             next_btn = self.page.locator(
                 "button[title='Next Page'], button[name='next'], "
                 "a[title='Next'], lightning-primitive-icon[alternative-text='Next']"
@@ -571,159 +650,172 @@ class RetailerPortalEngine:
                 break
 
         if target_row is None:
-            print(f"  ❌ Invoice {invoice_no} not found in table. Skipping.")
-            return
-
-        # ── 2. Duplicate check ────────────────────────────────────────
-        # Before opening the modal, verify this payment mode hasn't
-        # already been entered in a previous run or earlier this session.
-        if self._already_entered(target_row, payment_mode):
-            print(f"  ⏭  {payment_mode} already has a value for {invoice_no} — skipping to avoid duplicate.")
+            print(f"  ❌ Invoice {invoice_no} not found in table — skipping all payments.")
             return
 
         target_row.scroll_into_view_if_needed()
-        self.page.wait_for_timeout(800)
+        self.page.wait_for_timeout(500)
 
-        # ── 3. Handle Cash payments: enter directly in table row ───────
-        if payment_mode == "Cash":
-            print("  Entering Cash payment directly in table row...")
-            try:
-                # Find the Cash column index
-                header_cells = self.page.locator("table thead tr th")
-                cash_col_index = -1
-                for i in range(header_cells.count()):
-                    if "Cash".lower() in header_cells.nth(i).inner_text().lower():
-                        cash_col_index = i
-                        break
+        # ── 2. Cash — fill directly in the table cell (no modal) ──────
+        cash_entry = next((p for p in payments if p["payment_mode"] == "Cash"), None)
+        modal_payments = [p for p in payments if p["payment_mode"] != "Cash"]
 
-                if cash_col_index == -1:
-                    raise RuntimeError("Cash column not found in table")
+        if cash_entry:
+            if self._already_entered(target_row, "Cash"):
+                print(f"  ⏭  Cash already entered for {invoice_no} — skipping.")
+            else:
+                print("  Entering Cash directly in table row...")
+                try:
+                    header_cells   = self.page.locator("table thead tr th")
+                    cash_col_index = -1
+                    for i in range(header_cells.count()):
+                        if "cash" in header_cells.nth(i).inner_text().lower():
+                            cash_col_index = i
+                            break
 
-                # Get the Cash cell for this row and fill it
-                cash_cell = target_row.locator("td").nth(cash_col_index)
-                cash_input = cash_cell.locator("input").first
-                self._clear_and_fill(cash_input, amount, "Cash Amount")
-                self.page.wait_for_timeout(800)
-                print(f"  ✅ Cash payment entered directly: Rs.{amount}")
-                return
+                    if cash_col_index == -1:
+                        raise RuntimeError("Cash column not found in table header")
 
-            except Exception as e:
-                print(f"  ⚠️  Failed to enter Cash directly: {e} — falling back to modal")
-                # Continue to modal flow as fallback
+                    cash_input = (
+                        target_row.locator("td").nth(cash_col_index)
+                                  .locator("input").first
+                    )
+                    self._clear_and_fill(cash_input, cash_entry["amount"], "Cash Amount")
+                    self.page.wait_for_timeout(800)
+                    print(f"  ✅ Cash entered: Rs.{cash_entry['amount']}")
 
-        # ── 3b. Click row-level "Add Collections" (+) button ───────────
-        row_add_btn = target_row.locator("button").first
-        self._safe_mouse_click(row_add_btn, label="row + (Add Collections)")
-        self.page.wait_for_timeout(2000)
-        self._wait_mask_gone()
+                except Exception as e:
+                    print(f"  ⚠️  Cash direct entry failed: {e} — adding to modal queue")
+                    modal_payments = [cash_entry] + modal_payments
 
-        # ── 4. Wait for modal ─────────────────────────────────────────
-        modal = self.page.locator("div.slds-modal__container")
-        modal.wait_for(state="visible", timeout=15000)
-        self.page.wait_for_timeout(600)
-        print("  ✅ Modal opened.")
+        # ── 3. Modal payments — UPI, Cheque, NEFT, etc. ───────────────
+        for payment in modal_payments:
+            payment_mode = payment["payment_mode"]
+            amount       = payment["amount"]
+            cheque_no    = payment.get("cheque_no", "")
+            slds_date    = to_slds_date(payment["date"])
 
-        if debug:
-            self.debug_modal_fields(modal, tag="initial")
+            print(f"\n  ── Modal: {payment_mode}  Rs.{amount}  (date: {slds_date})")
 
-        # ── 5. Payment Mode ───────────────────────────────────────────
-        print(f"  Selecting payment mode: {payment_mode!r}")
-        self._wait_mask_gone()   # clear any overlay before opening dropdown
-        modal.locator("button[name='paymentMode']").click()
-        self.page.wait_for_timeout(800)
-        self._wait_mask_gone()   # clear mask that may close the dropdown
+            # Duplicate check before opening modal
+            if self._already_entered(target_row, payment_mode):
+                print(f"  ⏭  {payment_mode} already entered for {invoice_no} — skipping.")
+                continue
 
-        # filter(has_text) is more robust than exact ARIA name matching in
-        # Salesforce LWC where options may have nested spans / whitespace.
-        # _safe_mouse_click uses bounding box — reliable in Shadow DOM.
-        option = self.page.locator("[role='option']").filter(has_text=payment_mode).first
-        option.wait_for(state="visible", timeout=10000)
-        self._safe_mouse_click(option, label=f"option:{payment_mode}")
-        self.page.wait_for_timeout(600)
-        print(f"  ✅ Payment Mode: {payment_mode}")
+            # ── 3a. Click the row-level (+) Add Collections button ────
+            row_add_btn = target_row.locator("button").first
+            self._safe_mouse_click(row_add_btn, label="row + (Add Collections)")
+            self.page.wait_for_timeout(2000)
+            self._wait_mask_gone()
 
-        # ── 6. Cheque No (appears dynamically after selecting Cheque) ──
-        if cheque_no:
-            print(f"  Waiting for Cheque No field...")
-            cheque_input = modal.locator(
-                "input[name='chequeNo'], "
-                "input[name='cheque_no'], "
-                "input[name='chequeno'], "
-                "input[placeholder*='heque']"
+            # ── 3b. Wait for modal ────────────────────────────────────
+            modal = self.page.locator("div.slds-modal__container")
+            modal.wait_for(state="visible", timeout=15000)
+            self.page.wait_for_timeout(600)
+            print("  ✅ Modal opened.")
+
+            if debug:
+                self.debug_modal_fields(modal, tag="initial")
+
+            # ── 3c. Payment Mode dropdown ─────────────────────────────
+            print(f"  Selecting payment mode: {payment_mode!r}")
+            self._wait_mask_gone()
+            modal.locator("button[name='paymentMode']").click()
+            self.page.wait_for_timeout(800)
+            self._wait_mask_gone()
+
+            option = self.page.locator("[role='option']").filter(has_text=payment_mode).first
+            option.wait_for(state="visible", timeout=10000)
+            self._safe_mouse_click(option, label=f"option:{payment_mode}")
+            self.page.wait_for_timeout(600)
+            print(f"  ✅ Payment Mode: {payment_mode}")
+
+            # ── 3d. Cheque No (only visible after selecting Cheque) ───
+            if cheque_no:
+                print("  Waiting for Cheque No field...")
+                cheque_input = modal.locator(
+                    "input[name='chequeNo'], "
+                    "input[name='cheque_no'], "
+                    "input[name='chequeno'], "
+                    "input[placeholder*='heque']"
+                ).first
+                try:
+                    cheque_input.wait_for(state="visible", timeout=5000)
+                    self._clear_and_fill(cheque_input, cheque_no, "Cheque No")
+                except Exception:
+                    print("  ⚠️  Cheque field not found by name — trying nth(2)...")
+                    self._clear_and_fill(
+                        modal.locator("input").nth(2), cheque_no, "Cheque No (fallback)"
+                    )
+
+            # ── 3e. Amount ────────────────────────────────────────────
+            self._clear_and_fill(
+                modal.locator("input[name='amount']"), amount, "Amount"
+            )
+
+            # ── 3f. Date (SLDS picker — must use keyboard.type) ───────
+            self._fill_slds_date(
+                modal.locator("input[name='payDate']"), slds_date, label="Date"
+            )
+
+            # ── 3g. Transaction ID ────────────────────────────────────
+            txn_input = modal.locator(
+                "input[name='transactionId'], "
+                "input[name='transaction_id'], "
+                "input[name='txnId'], "
+                "input[name='txn_id'], "
+                "input[placeholder*='ransaction']"
             ).first
             try:
-                cheque_input.wait_for(state="visible", timeout=5000)
-                self._clear_and_fill(cheque_input, cheque_no, "Cheque No")
+                if txn_input.is_visible(timeout=3000):
+                    self._clear_and_fill(txn_input, "1", "Transaction ID")
             except Exception:
-                print("  ⚠️  Cheque field not found by name — trying nth(2)...")
-                self._clear_and_fill(
-                    modal.locator("input").nth(2), cheque_no, "Cheque No (fallback)"
+                pass
+
+            if debug:
+                self.debug_modal_fields(modal, tag="after-fill")
+
+            # ── 3h. Add Payment ───────────────────────────────────────
+            print("  Clicking 'Add Payment'...")
+            add_payment_btn = modal.locator("button[title='Add Payment']")
+
+            if add_payment_btn.is_disabled():
+                print("  ⚠️  'Add Payment' still DISABLED — a field may be invalid.")
+                _ss = os.path.join(_screenshots_dir, f"DISABLED_{invoice_no}_{payment_mode}.png")
+                self.page.screenshot(path=_ss, full_page=False)
+                print(f"  📸 {_ss}")
+                raise RuntimeError(
+                    f"'Add Payment' disabled for {invoice_no} [{payment_mode}]. Screenshot saved."
                 )
+            else:
+                self._safe_mouse_click(add_payment_btn, label="Add Payment")
+                self.page.wait_for_timeout(800)
 
-        # ── 7. Amount ─────────────────────────────────────────────────
-        self._clear_and_fill(
-            modal.locator("input[name='amount']"), amount, "Amount"
-        )
-
-        # ── 8. Date (SLDS text date picker — must use keyboard.type) ──
-        self._fill_slds_date(
-            modal.locator("input[name='payDate']"),
-            slds_date,
-            label="Date"
-        )
-
-        # ── 8b. Transaction ID — required field, default "1" ──────────
-        txn_input = modal.locator(
-            "input[name='transactionId'], "
-            "input[name='transaction_id'], "
-            "input[name='txnId'], "
-            "input[name='txn_id'], "
-            "input[placeholder*='ransaction']"
-        ).first
-        try:
-            if txn_input.is_visible(timeout=3000):
-                self._clear_and_fill(txn_input, "1", "Transaction ID")
-        except Exception:
-            pass  # field not present for this payment mode — skip
-
-        if debug:
-            self.debug_modal_fields(modal, tag="after-fill")
-
-        # ── 9. Click "Add Payment" ─────────────────────────────────────
-        print("  Clicking 'Add Payment'...")
-        add_payment_btn = modal.locator("button[title='Add Payment']")
-
-        if add_payment_btn.is_disabled():
-            print("  ⚠️  'Add Payment' still DISABLED — a field may be invalid.")
-            _ss = os.path.join(_screenshots_dir, f"DISABLED_{invoice_no}.png")
+            # ── 3i. Screenshot then modal Save ────────────────────────
+            _ss = os.path.join(_screenshots_dir, f"02_modal_{invoice_no}_{payment_mode}.png")
             self.page.screenshot(path=_ss, full_page=False)
-            print(f"  📸 {_ss} saved.")
-            raise RuntimeError(
-                f"'Add Payment' button disabled for {invoice_no} [{payment_mode}] — "
-                "check the modal fields. Screenshot saved."
-            )
-        else:
-            self._safe_mouse_click(add_payment_btn, label="Add Payment")
-            self.page.wait_for_timeout(800)
+            print(f"  📸 {_ss}")
 
-        # ── 10. Screenshot before saving ──────────────────────────────
-        _ss = os.path.join(_screenshots_dir, f"02_modal_{invoice_no}_{payment_mode}.png")
-        self.page.screenshot(path=_ss, full_page=False)
-        print(f"  📸 {_ss} saved.")
+            save_btn = modal.get_by_role("button", name="Save", exact=True)
+            self._safe_mouse_click(save_btn, label="modal Save")
+            print("  ✅ Modal Save clicked.")
 
-        # ── 11. Save inside modal ──────────────────────────────────────
-        save_btn = modal.get_by_role("button", name="Save", exact=True)
-        self._safe_mouse_click(save_btn, label="modal Save")
-        print("  ✅ Modal Save clicked.")
+            # ── 3j. Wait for modal to close before next payment ───────
+            modal.wait_for(state="hidden", timeout=15000)
+            self._wait_mask_gone()
+            self.page.wait_for_timeout(1000)
 
-        # ── 12. Wait for modal to close ───────────────────────────────
-        modal.wait_for(state="hidden", timeout=15000)
-        self._wait_mask_gone()
-        self.page.wait_for_timeout(1000)
+            # Re-locate target_row: LWC may re-render the table after save
+            tbl_rows = self.page.locator("table tbody tr")
+            for i in range(tbl_rows.count()):
+                if invoice_no in tbl_rows.nth(i).inner_text():
+                    target_row = tbl_rows.nth(i)
+                    break
 
-        _ss = os.path.join(_screenshots_dir, f"03_done_{invoice_no}_{payment_mode}.png")
+        # ── 4. Final screenshot for this invoice ──────────────────────
+        _ss = os.path.join(_screenshots_dir, f"03_done_{invoice_no}.png")
         self.page.screenshot(path=_ss, full_page=True)
-        print(f"  ✅ Done → {_ss} saved.")
+        print(f"  ✅ All payments done → {_ss}")
 
     # ── FINAL PAGE SAVE ────────────────────────────────────────────────
     def save_page(self):
@@ -760,29 +852,31 @@ if __name__ == "__main__":
         # Read sheet — date auto-detected from first data row
         csv_path = config.get("sheet_path", r"D:\TATA_SHIPMENTS.xlsx")
         print(f"Reading sheet: {csv_path}")
-        rows, run_date = load_rows_from_csv(csv_path)
+        rows, from_date, to_date = load_rows_from_csv(csv_path)
 
         if not rows:
             print("⚠️  No processable rows found in sheet.")
             input("\nPress Enter to close...")
         else:
-            print(f"\nDate from sheet  : {run_date}")
+            if from_date == to_date:
+                print(f"\nDate from sheet   : {from_date}")
+            else:
+                print(f"\nDate range        : {from_date}  →  {to_date}")
             print(f"Entries to process: {len(rows)}")
             for r in rows:
                 print(f"  {r['invoice_no']}  {r['payment_mode']:8}  Rs.{r['amount']}")
 
-            # Navigate using date from the sheet — no manual config needed
-            engine.navigate_to_settlement_page(run_date)
+            # Navigate using date range derived from the sheet
+            engine.navigate_to_settlement_page(from_date, to_date)
 
-            # Process each payment entry
+            # Group flat payment list by invoice_no (preserving sheet order)
+            # so all payments for one invoice are processed in a single pass.
+            invoices = {}
             for row in rows:
-                engine.fill_one_row(
-                    invoice_no   = row["invoice_no"],
-                    payment_mode = row["payment_mode"],
-                    cheque_no    = row.get("cheque_no", ""),
-                    amount       = row["amount"],
-                    date         = row["date"],
-                )
+                invoices.setdefault(row["invoice_no"], []).append(row)
+
+            for invoice_no, payments in invoices.items():
+                engine.fill_invoice(invoice_no, payments)
 
             print("\n✅ All entries processed.")
 
