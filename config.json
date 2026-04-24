@@ -3,6 +3,6 @@
   "settlement_url": "https://mavic-tataconsumer.my.site.com/dms/s/manual-invoice-payment-settlement",
   "headless": false,
   "debug": false,
-  "sheet_path": "C:/Users/sandi/OneDrive/Desktop/TATA SHIPMENTS_April - Copy.xlsx",
+  "sheet_path": "D:/TATA_SHIPMENTS_April - Test.xlsx",
   "selected_portal": "tata_consumer"
 }

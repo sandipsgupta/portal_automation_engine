@@ -22,7 +22,7 @@ if exist dist  rmdir /s /q dist
 
 REM ── Step 3: Build .exe with PyInstaller ──────────────────────────────
 echo [3/3] Building PortalAutomationEngine.exe...
-python -m PyInstaller portal_engine.spec --noconfirm
+python -m PyInstaller PortalAutomationEngine.spec --noconfirm
 if errorlevel 1 ( echo ERROR: PyInstaller build failed. & pause & exit /b 1 )
 
 echo.

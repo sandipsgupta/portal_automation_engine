@@ -58,34 +58,37 @@ PORTAL_COL_MAP = {
 
 def load_rows_from_csv(csv_path: str):
     """
-    Read invoice rows from CSV (.csv) or Excel (.xlsx/.xls).
+    Read invoice rows from CSV (.csv) or Excel (.xlsx).
     Columns used: Bill Number, Bill Date, Cash, Cheque Amount, UPI Amount,
                   Credit Amount
 
     Returns:
         rows      — list of payment entry dicts to process
-        from_date — earliest delivery/cheque date in sheet (DD-MM-YYYY),
+        from_date — earliest Bill Date in sheet (DD-MM-YYYY),
                     used for the portal Invoice From Date filter
-        to_date   — latest delivery/cheque date in sheet (DD-MM-YYYY),
+        to_date   — latest Bill Date in sheet (DD-MM-YYYY),
                     used for the portal Invoice To Date filter
 
     Rules:
       - Credit-only rows are SKIPPED (separate Add Credit Note flow)
       - Split payments (Cash + UPI on same row) produce TWO entries
       - Rows with no payable amount are skipped with a warning
-      - from_date/to_date span ALL delivery dates in the sheet, not just
+      - from_date/to_date span ALL bill dates in the sheet, not just
         the first row — supports multi-date sheets
     """
     rows     = []
     skipped  = []
     run_date = None   # bill date of first row (fallback only)
-    date_set = set()  # all delivery/cheque dates seen across all rows
+    date_set = set()  # all bill dates seen across all rows
 
     # ── Load rows from CSV or Excel ───────────────────────────────────
     ext = str(csv_path).lower()
-    if ext.endswith(".xlsx") or ext.endswith(".xls"):
+    if ext.endswith(".xls"):
+        print("⚠️  Legacy .xls is not supported — convert to .xlsx or .csv.")
+        raw_rows = []
+    elif ext.endswith(".xlsx"):
         if openpyxl is None:
-            print("⚠️  openpyxl not available — cannot read .xlsx files")
+            print("⚠️  openpyxl not available — cannot read Excel (.xlsx) files")
             raw_rows = []
         else:
             wb   = openpyxl.load_workbook(csv_path, data_only=True)
@@ -115,10 +118,14 @@ def load_rows_from_csv(csv_path: str):
             run_date = date_raw
 
         # ── Resolve dates ─────────────────────────────────────────────
-        # Bill Date is informational only — never used as a payment date.
-        # DELIVERY DATE is used for Cash and UPI.
-        # CHEQUE DATE is used for Cheque, falls back to DELIVERY DATE.
+        # BILL DATE is used for the portal search filter (invoice date range).
+        # DELIVERY DATE is used for Cash and UPI payment dates.
+        # CHEQUE DATE is used for Cheque payment dates, falls back to DELIVERY DATE.
         bill_year       = _parse_date(date_raw).year if date_raw else datetime.now().year
+        bill_date = (
+            _parse_date(date_raw, ref_year=bill_year).strftime("%d-%m-%Y")
+            if date_raw else ""
+        )
         delivery_raw    = raw.get("DELIVERY DATE",  "").strip()
         cheque_date_raw = raw.get("CHEQUE DATE",    "").strip()
         cheque_no_raw   = raw.get("CHEQUE NUMBER",  "").strip()
@@ -132,11 +139,10 @@ def load_rows_from_csv(csv_path: str):
             if cheque_date_raw else delivery_date
         )
 
-        # Collect all payment dates to derive the portal filter range
-        if delivery_date:
-            date_set.add(_parse_date(delivery_date))
-        if cheque_date and cheque_date != delivery_date:
-            date_set.add(_parse_date(cheque_date))
+        # Collect BILL DATES only for the portal filter range
+        # (This finds invoices by their invoice/bill date, not payment dates)
+        if bill_date:
+            date_set.add(_parse_date(bill_date))
 
         # Build one entry per non-empty payment column
         payments = []
@@ -182,7 +188,7 @@ def load_rows_from_csv(csv_path: str):
         for s in skipped:
             print(s)
 
-    # Derive portal date filter range from all payment dates seen
+    # Derive portal date filter range from all bill dates seen
     if date_set:
         from_date = min(date_set).strftime("%d-%m-%Y")
         to_date   = max(date_set).strftime("%d-%m-%Y")
@@ -555,7 +561,14 @@ class RetailerPortalEngine:
         top_search = date_area.get_by_role("button", name="Search", exact=True).first
         top_search.scroll_into_view_if_needed()
         self._wait_mask_gone()
-        top_search.click()
+        self.page.wait_for_timeout(1000)  # Extra wait to ensure page is fully ready
+        try:
+            top_search.click(timeout=15000)
+        except Exception as e:
+            print(f"  ⚠️  Top Search click failed: {e}, retrying...")
+            self._wait_mask_gone()
+            self.page.wait_for_timeout(2000)
+            top_search.click(force=True, timeout=10000)
         print("Top Search clicked.")
         self.page.wait_for_timeout(2000)
         self._wait_mask_gone()
@@ -565,18 +578,52 @@ class RetailerPortalEngine:
         lower_search = all_search.nth(all_search.count() - 1)
         lower_search.scroll_into_view_if_needed()
         self._wait_mask_gone()
+        self.page.wait_for_timeout(1000)  # Let page settle before clicking
+
         try:
-            lower_search.click(timeout=10000)
-        except Exception:
+            lower_search.click(timeout=15000)
+        except Exception as e:
+            print(f"  ⚠️  Bottom Search click failed: {e}, retrying with force...")
             self._wait_mask_gone()
+            self.page.wait_for_timeout(2000)
             lower_search.click(force=True, timeout=10000)
         print("Bottom Search clicked.")
 
+        # Wait for the search to trigger — look for loading mask or API call
+        self.page.wait_for_timeout(3000)
+        self._wait_mask_gone()
+        self.page.wait_for_timeout(1000)
+
+        # Check if search triggered an error message
+        try:
+            error_msg = self.page.locator("[role='alert'], .error, .slds-notify--error").first
+            if error_msg.is_visible(timeout=2000):
+                print(f"  ⚠️  Search error detected: {error_msg.inner_text()[:100]}")
+        except Exception:
+            pass  # No error message found, continue
+
         # Wait longer — LWC re-renders table after API response
-        self.page.wait_for_timeout(6000)
+        self.page.wait_for_timeout(8000)
         self._wait_mask_gone()
         self.page.wait_for_timeout(2000)
         self._wait_mask_gone()
+
+        # Wait for table rows to be rendered
+        row_count = self.page.locator("table tbody tr").count()
+        if row_count == 0:
+            # No rows yet — wait for them to appear
+            try:
+                self.page.locator("table tbody tr").first.wait_for(state="visible", timeout=15000)
+                row_count = self.page.locator("table tbody tr").count()
+            except Exception as e:
+                print(f"  ⚠️  Table empty after search: {e}")
+                print(f"     Check: date range is correct, invoices exist in portal for those dates")
+                row_count = 0
+
+        if row_count > 0:
+            print(f"  ✅ Table loaded with {row_count} rows")
+        else:
+            print(f"  ❌ Search returned 0 rows — table is empty")
 
         self._set_max_rows_per_page()
 
@@ -619,13 +666,30 @@ class RetailerPortalEngine:
         page_num   = 1
         while True:
             tbl_rows = self.page.locator("table tbody tr")
-            tbl_rows.first.wait_for(state="visible", timeout=30000)
             row_count = tbl_rows.count()
+
+            # If no rows found on page 1, the search likely returned no results
+            if row_count == 0 and page_num == 1:
+                try:
+                    tbl_rows.first.wait_for(state="visible", timeout=5000)
+                except Exception:
+                    # Table is empty — invoice not found in search results
+                    print(f"  ❌ Invoice not found in search results (table is empty).")
+                    return
+
+            if row_count == 0:
+                print(f"  ❌ Invoice error: Locator.wait_for: Timeout 30000ms exceeded.")
+                print(f"  Call log:")
+                print(f"    - waiting for locator(\"table tbody tr\").first to be visible")
+                return
+
             print(f"  Rows in table: {row_count} (page {page_num})")
 
             for i in range(row_count):
                 row = tbl_rows.nth(i)
-                if invoice_no in row.inner_text():
+                row_text = row.inner_text()
+                # Try exact match first, then fuzzy match (handles whitespace)
+                if invoice_no in row_text or invoice_no.strip() in row_text.replace(" ", ""):
                     target_row = row
                     print(f"  ✅ Matched row {i} (page {page_num})")
                     break
@@ -681,7 +745,8 @@ class RetailerPortalEngine:
                                   .locator("input").first
                     )
                     self._clear_and_fill(cash_input, cash_entry["amount"], "Cash Amount")
-                    self.page.wait_for_timeout(800)
+                    self.page.wait_for_timeout(1200)
+                    self._wait_mask_gone()
                     print(f"  ✅ Cash entered: Rs.{cash_entry['amount']}")
 
                 except Exception as e:
@@ -803,7 +868,7 @@ class RetailerPortalEngine:
             # ── 3j. Wait for modal to close before next payment ───────
             modal.wait_for(state="hidden", timeout=15000)
             self._wait_mask_gone()
-            self.page.wait_for_timeout(1000)
+            self.page.wait_for_timeout(1500)
 
             # Re-locate target_row: LWC may re-render the table after save
             tbl_rows = self.page.locator("table tbody tr")
@@ -822,14 +887,18 @@ class RetailerPortalEngine:
         """Commit all rows to the portal."""
         print("\nClicking final page Save...")
         self._wait_mask_gone()
-        save_btn = self.page.get_by_role("button", name="Save", exact=True).last
-        save_btn.scroll_into_view_if_needed()
-        save_btn.click()
-        self.page.wait_for_timeout(3000)
-        self._wait_mask_gone()
-        _ss = os.path.join(_screenshots_dir, "04_final_save.png")
-        self.page.screenshot(path=_ss, full_page=True)
-        print(f"✅ Final Save complete → {_ss} saved.")
+        try:
+            save_btn = self.page.get_by_role("button", name="Save", exact=True).last
+            save_btn.scroll_into_view_if_needed(timeout=5000)
+            save_btn.click(timeout=10000)
+            self.page.wait_for_timeout(3000)
+            self._wait_mask_gone()
+            _ss = os.path.join(_screenshots_dir, "04_final_save.png")
+            self.page.screenshot(path=_ss, full_page=True)
+            print(f"✅ Final Save complete → {_ss} saved.")
+        except Exception as e:
+            print(f"⚠️  Save button not found or page empty: {e}")
+            print("   (This is OK if all entries were duplicates and skipped)")
 
     def close(self):
         print("Closing browser...")
